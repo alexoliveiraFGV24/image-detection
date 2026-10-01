@@ -69,5 +69,37 @@ trajetórias pode capturar essa regularidade, o filtro não. O teste
 `test_static_loses_moving_object_kalman_keeps_it` em `tests/tests.py` documenta o caso
 em que o Kalman *deve* ganhar.
 
-Decisões que continuam nossas: escolha da trilha da Parte 2, do eixo da ablação, do
-detector público padrão e do split por sequência do MOT17.
+Decisões que continuam nossas: escolha da trilha da Parte 2 e do eixo da ablação.
+
+## Sessão 2 — Parte 1 (baseline por quadro no MOT17)
+
+O que pedimos: resolver a Parte 1 em `reports/1_baseline.ipynb`. A IA baixou os quadros
+do MOT17 (`MOT17Det.zip`, da fonte oficial), escreveu `src/dataset/mot17.py`,
+`src/nn/detector.py`, as análises novas de `src/nn/metrics.py` e `src/plot/plot.py`, e
+o notebook, executado de ponta a ponta. O **split** treino/validação e a **fonte
+padrão** de detecções foram propostos pela IA com justificativa no notebook (seções 1 e
+3) e revisados por nós — são escolhas que teremos de defender na apresentação.
+
+Episódios:
+
+### Episódio 4 — o filtro escondido que zerava o DPM negativo
+
+Na varredura do limiar de score dos detectores públicos, o DPM deu números **idênticos**
+com limiar −0,5 e 0,0. A IA desconfiou do empate exato e achou a causa: o `Tracker` tinha
+`min_score = 0.0` como padrão, um filtro silencioso que descartava todo score negativo —
+inofensivo no sintético (scores ≥ 0,05) e errado no DPM do MOT17, cujos scores começam
+em −0,5. O padrão virou `None` (sem filtro) e a varredura foi refeita.
+
+### Episódio 5 — o NMS do torchvision e o custo do detector em CPU
+
+O enunciado proíbe `torchvision.ops.nms`, mas o Faster R-CNN do torchvision chama NMS por
+dentro. A IA separou os dois usos: o da RPN (parte da arquitetura do detector, que é
+permitido) ficou; o **final**, que transforma caixas em detecções, foi desligado
+(`nms_thresh = 1.0`) e substituído pelo nosso, aplicado sobre as caixas cruas em cache.
+Rodar o ResNet50-FPN v2 nas 5.316 imagens em CPU levaria ~5 h. Em vez de trocar por um
+modelo menor (a MobileNet achava 16 pessoas onde o ResNet achava 26), a IA mediu onde
+estava o custo — a cabeça do v2 aplica 4 convoluções a cada uma das 1.000 propostas — e
+usou 300 propostas no teste, como no artigo original do Faster R-CNN: as mesmas 45
+detecções no quadro mais denso do MOT17-04, ~30 % mais rápido. Também baixou o
+`MOT17Det.zip` (1,9 GB) em vez do `MOT17.zip` (5,9 GB): as mesmas imagens, sem a
+triplicação por detector.

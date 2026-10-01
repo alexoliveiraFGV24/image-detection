@@ -11,18 +11,29 @@ from matplotlib.patches import Rectangle
 from src.nn.boxes import ID, X1, X2, Y2, CONF, split_by_frame
 
 
-_PALETTE = plt.get_cmap("tab20").colors
+_GOLDEN = 0.6180339887498949
 
 
 def id_color(track_id):
-    """Cor RGB (tupla em [0, 1]) determinada pelo id."""
+    """
+    Cor RGB (tupla em [0, 1]) determinada so pelo id. O matiz anda pela
+    razao aurea, entao ids proximos (1, 2, 3...) ficam com cores bem
+    diferentes e a paleta nao se repete -- no MOT17 ha centenas de ids
+    previstos, e uma paleta de 20 cores esconderia trocas de id.
+    """
+
+    import colorsys
 
     track_id = int(track_id)
 
     if track_id < 0:
         return (0.6, 0.6, 0.6)
 
-    return _PALETTE[(track_id * 7) % len(_PALETTE)]
+    hue = (track_id * _GOLDEN) % 1.0
+    saturation = 0.65 + 0.35 * ((track_id // 3) % 2)
+    value = 0.95 - 0.25 * ((track_id // 5) % 2)
+
+    return colorsys.hsv_to_rgb(hue, saturation, value)
 
 
 def draw_boxes(ax, rows, color_by_id=True, color=None, linestyle="-", linewidth=1.5, label_ids=True, alpha=1.0):
@@ -48,7 +59,7 @@ def draw_boxes(ax, rows, color_by_id=True, color=None, linestyle="-", linewidth=
 
         if label_ids and row[ID] >= 0:
             ax.text(x1, y1 - 1, str(int(row[ID])), color=c, fontsize=7, va="bottom", ha="left",
-                    bbox=dict(facecolor="black", alpha=0.4, pad=0.5, edgecolor="none"))
+                    bbox=dict(facecolor="black", alpha=0.4, pad=0.5, edgecolor="none"), clip_on=True)
 
 
 def show_frames(video, frames, gt=None, pred=None, ncols=None, title=None, figsize_per=2.4, show_pred_ids=True):
@@ -268,48 +279,235 @@ def plot_breakdown(results, knob, metrics=("IDF1", "IDSW_per_gt_id", "id_ratio")
     return fig
 
 
-def plot_tracks_timeline(pred, gt, iou_threshold=0.5, ax=None, title=None):
+def plot_tracks_timeline(pred, gt, iou_threshold=0.5, ax=None, title=None, gt_ids=None, frames=None):
     """
     Linha do tempo das identidades: uma faixa por id verdadeiro, com a
     cor do id PREVISTO que estava casado em cada quadro. Trocas de cor
-    dentro de uma faixa sao ID switches; buracos sao quadros sem par.
+    dentro de uma faixa sao ID switches; cinza claro = presente no GT
+    sem par; branco = ausente do GT. Rasterizada (imshow), entao aguenta
+    as ~80 identidades x 1000 quadros do MOT17.
+
+    Args:
+        gt_ids: subconjunto de ids verdadeiros (padrao: todos).
+        frames: (inicio, fim) inclusivo (padrao: todos os quadros do GT).
     """
 
     from src.nn.metrics import frame_matching
 
     matches, _ = frame_matching(pred, gt, iou_threshold)
 
-    gt_ids = sorted(np.unique(np.asarray(gt)[:, ID]).astype(int))
-    gt_by_frame = split_by_frame(gt)
+    gt = np.asarray(gt)
+    all_ids = sorted(np.unique(gt[:, ID]).astype(int))
+    gt_ids = all_ids if gt_ids is None else list(gt_ids)
+    row_of = {g: r for r, g in enumerate(gt_ids)}
 
-    frames = sorted(gt_by_frame)
+    gt_frames = gt[:, 0].astype(int)
+    f0, f1 = (gt_frames.min(), gt_frames.max()) if frames is None else frames
+
+    image = np.ones((len(gt_ids), f1 - f0 + 1, 3))
+
+    for row in gt[(gt_frames >= f0) & (gt_frames <= f1)]:
+
+        gid = int(row[ID])
+
+        if gid not in row_of:
+            continue
+
+        t = int(row[0])
+        pid = matches.get(t, {}).get(gid)
+
+        image[row_of[gid], t - f0] = id_color(pid) if pid is not None else (0.85, 0.85, 0.85)
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 0.35 * len(gt_ids) + 1.2))
+        fig, ax = plt.subplots(figsize=(10, min(0.18 * len(gt_ids) + 1.2, 14)))
     else:
         fig = ax.figure
 
-    for row, gid in enumerate(gt_ids):
+    ax.imshow(image, aspect="auto", interpolation="nearest",
+              extent=(f0 - 0.5, f1 + 0.5, len(gt_ids) - 0.5, -0.5))
 
-        for t in frames:
+    if len(gt_ids) <= 40:
+        ax.set_yticks(range(len(gt_ids)))
+        ax.set_yticklabels([f"gt {g}" for g in gt_ids], fontsize=7)
+    else:
+        ax.set_ylabel("identidade verdadeira")
 
-            present = gid in gt_by_frame[t][:, ID].astype(int)
-
-            if not present:
-                continue
-
-            pid = matches.get(t, {}).get(gid)
-
-            color = id_color(pid) if pid is not None else (0.85, 0.85, 0.85)
-            ax.add_patch(Rectangle((t - 0.5, row - 0.4), 1.0, 0.8, color=color, linewidth=0))
-
-    ax.set_xlim(min(frames) - 0.5, max(frames) + 0.5)
-    ax.set_ylim(-0.6, len(gt_ids) - 0.4)
-    ax.set_yticks(range(len(gt_ids)))
-    ax.set_yticklabels([f"gt {g}" for g in gt_ids])
     ax.set_xlabel("quadro")
 
     if title:
         ax.set_title(title)
 
+    return fig
+
+
+def plot_decoupling(results, order, sources=None, axis_label=None, axis_values=None, title=None,
+                    highlight=None):
+    """
+    O grafico obrigatorio da Parte 1: o DESCOLAMENTO entre a qualidade
+    por quadro e a identidade no tempo, em dois paineis sobre as MESMAS
+    sequencias, ordenadas pelo eixo de dificuldade.
+
+        em cima   mAP por quadro (das deteccoes que entram no rastreador)
+                  e IDF1
+        embaixo   #ids previstos / #ids verdadeiros e ID switches por
+                  identidade verdadeira
+
+    Args:
+        results: DataFrame com colunas sequence, source, mAP, IDF1,
+            id_ratio, IDSW_per_gt_id.
+        order: lista de sequencias na ordem do eixo (facil -> dificil).
+        sources: fontes de deteccao a desenhar (padrao: todas).
+        axis_label / axis_values: nome e valor do eixo para os rotulos.
+        highlight: sequencias a destacar (ex.: as de validacao).
+    """
+
+    sources = list(results["source"].unique()) if sources is None else sources
+    styles = ["-", "--", ":", "-."]
+
+    x = np.arange(len(order))
+
+    fig, (top, bottom) = plt.subplots(2, 1, figsize=(13, 7.5), sharex=True)
+    bottom_right = bottom.twinx()
+
+    for k, source in enumerate(sources):
+
+        part = results[results["source"] == source].set_index("sequence").loc[order]
+        ls = styles[k % len(styles)]
+        suffix = f" ({source})" if len(sources) > 1 else ""
+
+        top.plot(x, part["mAP"], ls, marker="s", color="tab:gray", label="mAP por quadro" + suffix)
+        top.plot(x, part["IDF1"], ls, marker="o", color="tab:blue", label="IDF1" + suffix)
+
+        bottom.plot(x, part["id_ratio"], ls, marker="^", color="tab:purple",
+                    label="#ids previstos / #verdadeiros" + suffix)
+        bottom_right.plot(x, part["IDSW_per_gt_id"], ls, marker="v", color="tab:red",
+                          label="ID switches / id verdadeiro" + suffix)
+
+    top.set_ylim(0, 1)
+    top.set_ylabel("mAP  /  IDF1")
+    top.grid(alpha=0.3)
+    top.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5))
+
+    bottom.axhline(1.0, color="tab:purple", alpha=0.3, linewidth=1)
+    bottom.set_ylabel("#ids previstos / #verdadeiros", color="tab:purple")
+    bottom_right.set_ylabel("ID switches / id verdadeiro", color="tab:red")
+    bottom.set_ylim(bottom=0)
+    bottom_right.set_ylim(bottom=0)
+    bottom.grid(alpha=0.3)
+
+    handles = bottom.get_legend_handles_labels()[0] + bottom_right.get_legend_handles_labels()[0]
+    labels = bottom.get_legend_handles_labels()[1] + bottom_right.get_legend_handles_labels()[1]
+    bottom.legend(handles, labels, fontsize=8, loc="center left", bbox_to_anchor=(1.09, 0.5))
+
+    ticks = []
+    for i, name in enumerate(order):
+        label = name.replace("MOT17-", "")
+        if axis_values is not None:
+            label += f"\n{axis_values[i]}"
+        ticks.append(label)
+
+    bottom.set_xticks(x)
+    bottom.set_xticklabels(ticks)
+
+    if highlight:
+        for i, name in enumerate(order):
+            if name in highlight:
+                for ax in (top, bottom):
+                    ax.axvspan(i - 0.4, i + 0.4, color="gold", alpha=0.15, linewidth=0)
+
+    bottom.set_xlabel(f"sequencia (ordenada por {axis_label})" if axis_label else "sequencia")
+
+    if title:
+        fig.suptitle(title)
+
+    plt.tight_layout()
+    return fig
+
+
+def plot_keep_rate(curves, max_age=None, ax=None, title=None):
+    """
+    Fracao das recapturas que mantem o id, por duracao do buraco
+    (src/nn/metrics.py::keep_rate_by_gap).
+
+    Args:
+        curves: dict rotulo -> lista de {gap_lo, gap_hi, n, keep_rate}.
+        max_age: desenha a linha vertical do `max_age` do rastreador.
+    """
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 4))
+    else:
+        fig = ax.figure
+
+    for label, rows in curves.items():
+
+        centers = [r["gap_lo"] if r["gap_hi"] is None else (r["gap_lo"] + r["gap_hi"]) / 2 for r in rows]
+        centers = [max(c, 0.5) for c in centers]
+        ax.plot(centers, [r["keep_rate"] for r in rows], marker="o", label=label)
+
+    if max_age is not None:
+        ax.axvline(max_age + 0.5, color="k", linestyle="--", alpha=0.5)
+        ax.text(max_age + 0.7, 0.05, f"max_age = {max_age}", fontsize=8)
+
+    ax.set_xscale("log")
+    ax.set_xlabel("duracao do buraco (quadros sem par, escala log; 0 plotado em 0,5)")
+    ax.set_ylabel("fracao que mantem o id")
+    ax.set_ylim(-0.03, 1.03)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+
+    if title:
+        ax.set_title(title)
+
+    return fig
+
+
+def show_sequence_frames(seq, frames, gt=None, pred=None, crop=None, ncols=None, figsize_per=3.2,
+                         title=None, show_pred_ids=True):
+    """
+    Quadros reais de uma sequencia do MOT17 com o GT (linha cheia) e/ou
+    a predicao (tracejada), coloridos por identidade.
+
+    Args:
+        seq: MOT17Sequence com quadros disponiveis.
+        frames: indices (0-indexados).
+        crop: (x1, y1, x2, y2) para dar zoom numa regiao.
+    """
+
+    frames = list(frames)
+    ncols = ncols or len(frames)
+    nrows = int(np.ceil(len(frames) / ncols))
+
+    gt_by_frame = split_by_frame(gt) if gt is not None else {}
+    pred_by_frame = split_by_frame(pred) if pred is not None else {}
+
+    x1, y1, x2, y2 = crop if crop is not None else (0, 0, seq.width, seq.height)
+    aspect = (y2 - y1) / (x2 - x1)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(figsize_per * ncols, figsize_per * aspect * nrows + 0.4),
+                             squeeze=False)
+
+    for k, t in enumerate(frames):
+
+        ax = axes[k // ncols, k % ncols]
+        ax.imshow(seq.image(t))
+
+        if t in gt_by_frame:
+            draw_boxes(ax, gt_by_frame[t], linestyle="-", label_ids=pred is None, linewidth=1.2)
+
+        if t in pred_by_frame:
+            draw_boxes(ax, pred_by_frame[t], linestyle="--", linewidth=1.5, label_ids=show_pred_ids)
+
+        ax.set_xlim(x1, x2)
+        ax.set_ylim(y2, y1)
+        ax.set_title(f"t = {t}", fontsize=9)
+        ax.axis("off")
+
+    for k in range(len(frames), nrows * ncols):
+        axes[k // ncols, k % ncols].axis("off")
+
+    if title:
+        fig.suptitle(title)
+
+    plt.tight_layout()
     return fig

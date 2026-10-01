@@ -42,6 +42,7 @@ from src.nn.metrics import (          # noqa: F401  (re-export)
     frame_matching,
 )
 from src.nn.boxes import mot_to_table, nms, box_iou_matrix   # noqa: F401
+from src.dataset.mot17 import remove_distractor_matches
 
 
 def load_mot(path, gt=False, keep_classes=(1,), min_visibility=0.0):
@@ -75,12 +76,20 @@ def main(argv=None):
     parser.add_argument("--iou", type=float, default=0.5, help="limiar de IoU (padrao 0.5)")
     parser.add_argument("--min-visibility", type=float, default=0.0, help="ignora GT com visibilidade abaixo disto")
     parser.add_argument("--no-map", action="store_true", help="nao calcula o mAP de deteccao")
+    parser.add_argument("--keep-distractors", action="store_true",
+                        help="nao remove as previsoes casadas com distratores (classes 2, 7, 8, 12)")
     parser.add_argument("--json", default=None, help="grava o resultado neste arquivo")
 
     args = parser.parse_args(argv)
 
     gt = load_mot(args.gt, gt=True, min_visibility=args.min_visibility)
     pred = load_mot(args.pred, gt=False)
+
+    # regra oficial do MOTChallenge: previsoes que cobrem distratores
+    # (pessoa em veiculo, estatica, reflexo...) nao contam como FP
+    raw_gt = np.loadtxt(args.gt, delimiter=",", ndmin=2)
+    if raw_gt.shape[1] > 7 and not args.keep_distractors:
+        pred = remove_distractor_matches(pred, raw_gt)
 
     stats = evaluate_tracking(pred, gt, iou_threshold=args.iou, detection_map=not args.no_map)
 

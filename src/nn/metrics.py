@@ -117,65 +117,14 @@ def match_boxes(boxes_a, boxes_b, iou_threshold, method="greedy"):
 # ============================================================
 
 
-def average_precision(pred, gt, iou_threshold=0.5):
-    """
-    AP de deteccao (classe unica) sobre todos os quadros da tabela.
+def _area_under_pr(scores, tp_flags, total_gt):
+    """Area sob a curva precision-recall interpolada (slides 16-18)."""
 
-    Regra (a mesma do PA1, slides 16-18): ordena TODAS as deteccoes do
-    video por confianca decrescente; cada deteccao casa com o ground
-    truth ainda livre de maior IoU no seu quadro, se IoU >= limiar (TP),
-    senao e FP. AP = area sob a curva precision-recall interpolada.
-
-    Args:
-        pred: tabela (N, 7) de deteccoes; `conf` e o score.
-        gt: tabela (M, 7) de ground truth.
-
-    Returns:
-        AP (float).
-    """
-
-    pred_by_frame = split_by_frame(pred)
-    gt_by_frame = split_by_frame(gt)
-
-    total_gt = sum(len(rows) for rows in gt_by_frame.values())
-
-    if total_gt == 0:
+    if len(scores) == 0 or total_gt == 0:
         return 0.0
 
-    detections = []   # (score, is_tp)
-
-    for frame, rows in pred_by_frame.items():
-
-        scores = rows[:, CONF]
-        boxes = rows[:, X1:Y2 + 1]
-
-        gt_rows = gt_by_frame.get(frame)
-        gt_boxes = gt_rows[:, X1:Y2 + 1] if gt_rows is not None else np.zeros((0, 4))
-
-        iou = box_iou_matrix(boxes, gt_boxes)
-        matched = np.zeros(gt_boxes.shape[0], dtype=bool)
-
-        for p in np.argsort(-scores, kind="stable"):
-
-            is_tp = 0
-
-            if gt_boxes.shape[0] > 0:
-
-                row = np.where(matched, -1.0, iou[p])
-                best = int(np.argmax(row))
-
-                if row[best] >= iou_threshold:
-                    matched[best] = True
-                    is_tp = 1
-
-            detections.append((float(scores[p]), is_tp))
-
-    if len(detections) == 0:
-        return 0.0
-
-    detections.sort(key=lambda d: d[0], reverse=True)
-
-    tp = np.array([d[1] for d in detections], dtype=np.float64)
+    order = np.argsort(-np.asarray(scores), kind="stable")
+    tp = np.asarray(tp_flags, dtype=np.float64)[order]
     fp = 1.0 - tp
 
     cumulative_tp = np.cumsum(tp)
@@ -188,12 +137,81 @@ def average_precision(pred, gt, iou_threshold=0.5):
     precision = np.concatenate(([1.0], precision, [0.0]))
 
     # Envelope: precisao interpolada (maximo a direita)
-    for i in range(len(precision) - 2, -1, -1):
-        precision[i] = max(precision[i], precision[i + 1])
+    precision = np.maximum.accumulate(precision[::-1])[::-1]
 
     indices = np.where(recall[1:] != recall[:-1])[0]
 
     return float(np.sum((recall[indices + 1] - recall[indices]) * precision[indices + 1]))
+
+
+def average_precisions(pred, gt, thresholds=(0.5,)):
+    """
+    AP de deteccao (classe unica) para varios limiares de IoU de uma vez.
+
+    Regra (a mesma do PA1, slides 16-18): ordena TODAS as deteccoes do
+    video por confianca decrescente; cada deteccao casa com o ground
+    truth ainda livre de maior IoU no seu quadro, se IoU >= limiar (TP),
+    senao e FP. AP = area sob a curva precision-recall interpolada.
+
+    A matriz de IoU de cada quadro e calculada UMA vez e reaproveitada
+    em todos os limiares (o MOT17-04 tem 47 mil caixas verdadeiras).
+
+    Args:
+        pred: tabela (N, 7) de deteccoes; `conf` e o score.
+        gt: tabela (M, 7) de ground truth.
+        thresholds: limiares de IoU.
+
+    Returns:
+        {limiar: AP}
+    """
+
+    thresholds = [float(t) for t in thresholds]
+
+    pred_by_frame = split_by_frame(pred)
+    gt_by_frame = split_by_frame(gt)
+
+    total_gt = sum(len(rows) for rows in gt_by_frame.values())
+
+    scores = []
+    flags = {t: [] for t in thresholds}
+
+    for frame, rows in pred_by_frame.items():
+
+        frame_scores = rows[:, CONF]
+        order = np.argsort(-frame_scores, kind="stable")
+        scores.extend(frame_scores[order].tolist())
+
+        gt_rows = gt_by_frame.get(frame)
+
+        if gt_rows is None:
+            for t in thresholds:
+                flags[t].extend([0] * len(order))
+            continue
+
+        iou = box_iou_matrix(rows[order, X1:Y2 + 1], gt_rows[:, X1:Y2 + 1])
+
+        for t in thresholds:
+
+            matched = np.zeros(iou.shape[1], dtype=bool)
+
+            for p in range(iou.shape[0]):
+
+                row = np.where(matched, -1.0, iou[p])
+                best = int(np.argmax(row))
+
+                if row[best] >= t:
+                    matched[best] = True
+                    flags[t].append(1)
+                else:
+                    flags[t].append(0)
+
+    return {round(t, 2): _area_under_pr(scores, flags[t], total_gt) for t in thresholds}
+
+
+def average_precision(pred, gt, iou_threshold=0.5):
+    """AP de deteccao para um limiar de IoU (ver `average_precisions`)."""
+
+    return average_precisions(pred, gt, [iou_threshold])[round(float(iou_threshold), 2)]
 
 
 def mean_average_precision(pred, gt, thresholds=np.arange(0.50, 0.951, 0.05)):
@@ -204,10 +222,7 @@ def mean_average_precision(pred, gt, thresholds=np.arange(0.50, 0.951, 0.05)):
         (mAP, {limiar: AP})
     """
 
-    aps = {
-        round(float(t), 2): average_precision(pred, gt, iou_threshold=t)
-        for t in thresholds
-    }
+    aps = average_precisions(pred, gt, thresholds)
 
     return float(np.mean(list(aps.values()))), aps
 
@@ -292,8 +307,10 @@ def id_overlap_matrix(pred, gt, iou_threshold=0.5):
         # np.add.at lida com repeticoes (um id repetido no mesmo quadro)
         np.add.at(overlap, (gi[hits[:, 0]], pj[hits[:, 1]]), 1.0)
 
-    gt_len = np.array([len(gt[gt[:, ID] == i]) for i in gt_ids], dtype=np.float64)
-    pred_len = np.array([len(pred[pred[:, ID] == j]) for j in pred_ids], dtype=np.float64)
+    # quadros por identidade (np.unique devolve os ids ordenados, na mesma
+    # ordem de _id_index)
+    gt_len = np.unique(gt[:, ID], return_counts=True)[1].astype(np.float64) if len(gt) else np.zeros(0)
+    pred_len = np.unique(pred[:, ID], return_counts=True)[1].astype(np.float64) if len(pred) else np.zeros(0)
 
     return overlap, gt_ids, pred_ids, gt_len, pred_len
 
@@ -565,7 +582,7 @@ def evaluate_tracking(pred, gt, iou_threshold=0.5, match_method="hungarian", det
     """
     Todas as metricas de uma vez, num dict plano (serializavel em JSON):
 
-        IDF1, IDP, IDR, IDSW, FRAG, IDSW_per_gt_id, n_gt_ids, n_pred_ids,
+        IDF1, IDP, IDR, IDTP, IDFP, IDFN, IDSW, FRAG, IDSW_per_gt_id, n_gt_ids, n_pred_ids,
         count_error, id_ratio, MOTA, TP, FP, FN, mAP (opcional), AP@0.50
     """
 
@@ -580,6 +597,9 @@ def evaluate_tracking(pred, gt, iou_threshold=0.5, match_method="hungarian", det
         "IDF1": id_stats["IDF1"],
         "IDP": id_stats["IDP"],
         "IDR": id_stats["IDR"],
+        "IDTP": id_stats["IDTP"],
+        "IDFP": id_stats["IDFP"],
+        "IDFN": id_stats["IDFN"],
         "IDSW": sw_stats["IDSW"],
         "FRAG": sw_stats["FRAG"],
         "IDSW_per_gt_id": sw_stats["IDSW_per_gt_id"],
@@ -597,5 +617,98 @@ def evaluate_tracking(pred, gt, iou_threshold=0.5, match_method="hungarian", det
         map_value, aps = mean_average_precision(pred, gt)
         out["mAP"] = map_value
         out["AP@0.50"] = aps[0.5]
+
+    return out
+
+
+# ============================================================
+# DIAGNOSTICO  --  a identidade sobrevive a um buraco?
+# ============================================================
+
+
+def reacquisition_events(pred, gt, iou_threshold=0.5, method="hungarian"):
+    """
+    Horizonte de memoria EMPIRICO de um rastreador: cada vez que uma
+    identidade verdadeira volta a ser casada depois de `gap` quadros
+    presente no GT porem sem par (buraco: o detector nao a achou, ou a
+    associacao nao a ligou), registra se o id previsto e o MESMO de
+    antes do buraco.
+
+    Passagens sem buraco (gap = 0) tambem entram: uma troca de id de um
+    quadro para o seguinte e um evento com gap 0 e kept = False.
+
+    Returns:
+        lista de dicts {gt_id, frame, gap, kept, before, after}.
+    """
+
+    matches, _ = frame_matching(pred, gt, iou_threshold, method)
+
+    gt = np.asarray(gt, dtype=np.float64).reshape(-1, 7)
+    gt_by_frame = split_by_frame(gt)
+
+    last_pred = {}       # gt_id -> ultimo pred_id casado
+    gap = {}             # gt_id -> quadros sem par desde o ultimo casamento
+
+    events = []
+
+    for frame in sorted(matches):
+
+        current = matches[frame]
+
+        present = gt_by_frame[frame][:, ID].astype(int) if frame in gt_by_frame else []
+
+        for gid in present:
+
+            gid = int(gid)
+            pid = current.get(gid)
+
+            if pid is None:
+                if gid in last_pred:
+                    gap[gid] = gap.get(gid, 0) + 1
+                continue
+
+            if gid in last_pred:
+                events.append({
+                    "gt_id": gid,
+                    "frame": int(frame),
+                    "gap": int(gap.get(gid, 0)),
+                    "kept": bool(last_pred[gid] == pid),
+                    "before": int(last_pred[gid]),
+                    "after": int(pid),
+                })
+
+            last_pred[gid] = pid
+            gap[gid] = 0
+
+    return events
+
+
+def keep_rate_by_gap(events, bins=(0, 1, 2, 3, 5, 10, 20, 40, 80, 10**9)):
+    """
+    Agrega `reacquisition_events`: para cada faixa de duracao do buraco,
+    a fracao de recapturas que mantiveram o id.
+
+    Returns:
+        lista de dicts {gap_lo, gap_hi, n, keep_rate}.
+    """
+
+    gaps = np.array([e["gap"] for e in events], dtype=np.int64)
+    kept = np.array([e["kept"] for e in events], dtype=bool)
+
+    out = []
+
+    for lo, hi in zip(bins[:-1], bins[1:]):
+
+        sel = (gaps >= lo) & (gaps < hi)
+
+        if sel.sum() == 0:
+            continue
+
+        out.append({
+            "gap_lo": int(lo),
+            "gap_hi": int(hi - 1) if hi < 10**9 else None,
+            "n": int(sel.sum()),
+            "keep_rate": float(kept[sel].mean()),
+        })
 
     return out

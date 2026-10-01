@@ -28,6 +28,10 @@ from src.nn.models import (
     RNNCell, LSTMCell, GRUCell, MotionModel, hidden_size_for_budget, cell_parameter_count,
 )
 from src.nn.loss import smooth_l1_loss, gaussian_nll_loss, triplet_loss, contrastive_loss
+from src.nn.metrics import reacquisition_events, keep_rate_by_gap
+from src.nn.tracking import track_sequence
+from src.nn.detector import apply_nms
+from src.dataset.mot17 import remove_distractor_matches, occlusion_durations, consecutive_iou
 
 
 # ------------------------------------------------------------
@@ -332,7 +336,7 @@ class TestModels(unittest.TestCase):
         self.assertEqual(float(pred.grad[0, 2].abs().sum()), 0.0)     # passo mascarado sem gradiente
 
         nll = gaussian_nll_loss(pred, target, log_var=torch.zeros(2, 3, 4), mask=mask)
-        self.assertAlmostEqual(float(nll), 0.5, places=5)
+        self.assertAlmostEqual(nll.item(), 0.5, places=5)
 
         emb = torch.nn.functional.normalize(torch.randn(8, 16), dim=-1)
         labels = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3])
@@ -342,6 +346,70 @@ class TestModels(unittest.TestCase):
         # embeddings perfeitos: perda zero
         perfect = torch.nn.functional.one_hot(labels, 16).float()
         self.assertAlmostEqual(float(triplet_loss(perfect, labels, margin=0.3)), 0.0)
+
+
+# ============================================================
+# Parte 1: MOT17, recaptura, NMS sobre deteccoes cruas
+# ============================================================
+
+
+class TestPart1(unittest.TestCase):
+
+    def test_distractor_filter(self):
+        """Previsao sobre um distrator (classe 7) sai; sobre um pedestre ou um carro (classe 3) fica."""
+        # gt.txt cru: frame (1-idx), id, left, top, w, h, conf, class, vis
+        gt_all = np.array([
+            [1, 1, 0, 0, 10, 20, 1, 1, 1.0],      # pedestre avaliado
+            [1, 2, 50, 0, 10, 20, 0, 7, 1.0],     # pessoa estatica (distrator)
+            [1, 3, 100, 0, 30, 20, 0, 3, 1.0],    # carro: nao e distrator
+        ])
+        pred = np.array([
+            [0, 10, 0, 0, 10, 20, 0.9],
+            [0, 11, 50, 0, 60, 20, 0.9],
+            [0, 12, 100, 0, 130, 20, 0.9],
+        ])
+        kept = remove_distractor_matches(pred, gt_all)
+        self.assertEqual(sorted(kept[:, 1].tolist()), [10, 12])
+
+    def test_reacquisition_events(self):
+        gt = straight_tracks(n_ids=1, n_frames=30)
+        pred = gt[(gt[:, 0] < 10) | (gt[:, 0] >= 14)].copy()       # buraco de 4 quadros
+        events = [e for e in reacquisition_events(pred, gt) if e["gap"] > 0]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["gap"], 4)
+        self.assertTrue(events[0]["kept"])
+
+        pred[pred[:, 0] >= 14, 1] = 9                                # volta com outro id
+        events = [e for e in reacquisition_events(pred, gt) if e["gap"] > 0]
+        self.assertFalse(events[0]["kept"])
+        rates = {r["gap_lo"]: r["keep_rate"] for r in keep_rate_by_gap(reacquisition_events(pred, gt))}
+        self.assertEqual(rates[0], 1.0)
+        self.assertEqual(rates[3], 0.0)
+
+    def test_apply_nms_per_frame(self):
+        raw = np.array([
+            [0, -1, 0, 0, 10, 10, 0.9],
+            [0, -1, 1, 1, 11, 11, 0.8],      # duplicata da primeira
+            [1, -1, 1, 1, 11, 11, 0.8],      # outro quadro: nao compete com o quadro 0
+            [1, -1, 50, 50, 60, 60, 0.2],    # abaixo do min_score
+        ])
+        out = apply_nms(raw, iou_threshold=0.5, min_score=0.5)
+        self.assertEqual(out[:, 0].tolist(), [0, 1])
+        self.assertEqual(out[:, 6].tolist(), [0.9, 0.8])
+
+    def test_track_sequence_processes_empty_frames(self):
+        """Quadros sem deteccao fazem a track envelhecer (e morrer)."""
+        gt = straight_tracks(n_ids=1, n_frames=20, speed=0.0)
+        det = gt[(gt[:, 0] < 5) | (gt[:, 0] >= 12)].copy()
+        det[:, 1] = -1
+        pred = track_sequence(det, 20, iou_threshold=0.3, max_age=3)
+        self.assertEqual(len(np.unique(pred[:, 1])), 2)
+
+    def test_occlusion_durations_and_consecutive_iou(self):
+        gt = straight_tracks(n_ids=1, n_frames=20, speed=0.0)
+        gt[(gt[:, 0] >= 5) & (gt[:, 0] < 9), 6] = 0.0               # 4 quadros invisivel, volta
+        self.assertEqual(occlusion_durations(gt, max_visibility=0.25).tolist(), [4])
+        np.testing.assert_allclose(consecutive_iou(gt), 1.0)        # parado: IoU 1 entre quadros
 
 
 if __name__ == "__main__":

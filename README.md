@@ -11,8 +11,9 @@ autoria.
 Dataset: **MOT17 / MOTChallenge** (pedestres, caixas e identidades anotadas quadro a
 quadro; detecções públicas DPM / Faster R-CNN / SDP).
 
-> **Estado atual:** Parte 0 (testes sintéticos) concluída; `src/` contém os modelos,
-> perdas, otimizadores, métricas e o rastreador usados pelas partes seguintes.
+> **Estado atual:** Partes 0 (testes sintéticos) e 1 (baseline por quadro no MOT17)
+> concluídas; `src/` contém os modelos, perdas, otimizadores, métricas, o rastreador e o
+> detector usados pelas partes seguintes.
 
 ---
 
@@ -49,17 +50,23 @@ restante do arquivo — os notebooks detectam `cuda` automaticamente.
 
 ## 2. Dados
 
-1. Baixe o pacote **só de anotações** do MOT17 (~10 MB, sem conta):
-   <https://motchallenge.net/data/MOT17/> → `MOT17Labels.zip`. Ele basta para a métrica,
-   a associação e a Trilha A (movimento). O pacote completo (~5,5 GB, com os quadros) só é
-   necessário para o detector do torchvision e para a Trilha B (aparência).
-2. Descompacte em `data/` (a pasta está no `.gitignore`). A estrutura esperada é a original:
+1. **Anotações** (~10 MB, sem conta): <https://motchallenge.net/data/MOT17Labels.zip>.
+   Bastam para a métrica, a associação com as detecções públicas e a Trilha A (movimento).
+   Descompacte em `data/MOT17Labels/`.
+2. **Quadros** (~1,9 GB, sem conta): <https://motchallenge.net/data/MOT17Det.zip>.
+   São as mesmas imagens do `MOT17.zip` (5,9 GB), mas uma vez por sequência — o pacote
+   completo repete cada sequência três vezes, uma por detector público. Necessários para o
+   detector do torchvision (Parte 1), para a Trilha B (aparência) e para as figuras.
+   Descompacte em `data/MOT17Det/`. (O `MOT17.zip` em `data/MOT17/` também funciona.)
+
+A pasta `data/` está no `.gitignore`. A estrutura esperada é a original:
 
 ```
 data/MOT17Labels/train/MOT17-02-FRCNN/gt/gt.txt      # frame, id, left, top, w, h, conf, class, visibility
-data/MOT17Labels/train/MOT17-02-FRCNN/det/det.txt    # detecções públicas
+data/MOT17Labels/train/MOT17-02-FRCNN/det/det.txt    # detecções públicas (idem -DPM, -SDP)
 data/MOT17Labels/train/MOT17-02-FRCNN/seqinfo.ini
-data/MOT17/train/MOT17-02-FRCNN/img1/000001.jpg      # (pacote completo) quadros
+data/MOT17Det/train/MOT17-02/img1/000001.jpg         # quadros
+data/detections/fasterrcnn_resnet50_fpn_v2/MOT17-02.npy   # cache do detector do torchvision (gerado)
 ```
 
 ## 3. Como rodar
@@ -76,8 +83,24 @@ baseline no piso fácil e o gráfico de onde ele quebra; ~2 min em CPU):
 jupyter nbconvert --to notebook --execute --inplace reports/0_sintetic_tests.ipynb
 ```
 
+**Parte 1 — baseline por quadro no MOT17.** Primeiro o detector do torchvision nas 7
+sequências (gera o cache em `data/detections/`; **~4 h em CPU** — num Ryzen 7 5700U,
+~2,6 s/quadro com dois processos de 4 threads; com GPU, minutos):
+
+```bash
+python -m src.nn.detector --threads 8
+```
+
+Depois o notebook (escolha do detector público, grade da regra de associação, avaliação
+das duas fontes, gráfico do descolamento e diagnóstico; ~15 min em CPU com o cache
+pronto — sem o cache, o próprio notebook roda o detector):
+
+```bash
+jupyter nbconvert --to notebook --execute --inplace reports/1_baseline.ipynb
+```
+
 **Testes unitários** (caixas, NMS, matching, os três casos da métrica, gerador,
-rastreador, células e perdas):
+rastreador, células, perdas, distratores do MOT17, recaptura de identidade):
 
 ```bash
 python -m unittest tests.tests -v
@@ -86,11 +109,14 @@ python -m unittest tests.tests -v
 **Métrica em arquivos do MOTChallenge** (o entregável `metrics.py`):
 
 ```bash
-python metrics.py --gt data/MOT17Labels/train/MOT17-02-FRCNN/gt/gt.txt --pred resultados/MOT17-02-FRCNN.txt
+python metrics.py --gt data/MOT17Labels/train/MOT17-09-FRCNN/gt/gt.txt --pred reports/results/1_baseline_tracks/MOT17-09.txt
 ```
 
-Os comandos de treino e avaliação do modelo temporal serão adicionados quando as
-Partes 1–2 forem concluídas.
+(`reports/results/1_baseline_tracks/` tem as trajetórias do baseline nas sequências de
+validação. O CLI aplica o mesmo pré-processamento oficial dos distratores dos notebooks.)
+
+Os comandos de treino e avaliação do modelo temporal serão adicionados quando a
+Parte 2 for concluída.
 
 ## 4. Estrutura do repositório
 
@@ -106,17 +132,21 @@ image-detection/
 │   ├── PA2.pdf                    # enunciado
 │   ├── 06) Detecção de objetos.pdf
 │   └── 07) RNN.pdf                # slides das aulas
-├── data/                          # NÃO versionado — MOT17Labels (e MOT17 completo, opcional)
+├── data/                          # NÃO versionado — MOT17Labels, MOT17Det (quadros), cache do detector
 ├── src/
 │   ├── dataset/
 │   │   ├── sintetic.py            # Parte 0: generate_video (elipses com ordem de profundidade e
 │   │   │                          #   oclusão de duração controlada), simulate_detector, SyntheticVideoDataset
+│   │   ├── mot17.py               # MOT17Sequence (GT, detecções públicas, quadros), split por sequência,
+│   │   │                          #   pré-processamento oficial dos distratores, eixos de dificuldade
 │   │   └── trajectories.py        # TrajectoryDataset: janelas de trajetórias do GT para o MotionModel
 │   ├── nn/
 │   │   ├── boxes.py               # IoU vetorizado, NMS próprio, conversões, tabelas (frame, id, x1, y1, x2, y2, conf)
 │   │   ├── metrics.py             # AP/mAP por quadro; IDF1, ID switches, fragmentações, contagem de ids, MOTA
 │   │   ├── tracking.py            # Tracker (associação + nascimento/morte) e modelos de movimento:
 │   │   │                          #   StaticMotion (Parte 1), KalmanMotion (baseline), RNNMotion (Parte 2)
+│   │   ├── detector.py            # Faster R-CNN do torchvision (COCO, person) com o NMS final trocado
+│   │   │                          #   pelo nosso; cache por sequência; CLI
 │   │   ├── models.py              # RNNCell/LSTMCell/GRUCell do zero, Recurrent (bidirecional opcional),
 │   │   │                          #   MotionModel (Trilha A), CropEncoder/AppearanceModel (Trilha B),
 │   │   │                          #   loops de treino (teacher forcing → scheduled sampling → free-running,
@@ -124,9 +154,10 @@ image-detection/
 │   │   ├── loss.py                # L1 / smooth-L1 / NLL gaussiana / GIoU (caixas); contrastiva / triplet (embeddings)
 │   │   └── optimizers.py          # create_optimizer, create_scheduler
 │   └── plot/plot.py               # cores consistentes por id, tiras de quadros, trajetória com oclusão,
-│                                  #   linha do tempo de identidades, curvas de quebra do baseline
+│                                  #   linha do tempo de identidades, curvas de quebra, descolamento
 ├── reports/
 │   ├── 0_sintetic_tests.ipynb     # Parte 0 — testes sintéticos
+│   ├── 1_baseline.ipynb           # Parte 1 — baseline por quadro no MOT17
 │   └── results/                   # métricas (JSON/CSV) e checkpoints (.pt) de cada parte
 └── tests/tests.py                 # unittest
 ```
@@ -141,6 +172,12 @@ image-detection/
   caixa prevista de cada track e as detecções do quadro; matching guloso por IoU
   decrescente (ou Hungarian), limiar fixo; detecção sem par → id novo; track sem par
   envelhece e morre após `max_age` quadros; só tracks observadas entram na saída.
+- **Split do MOT17** (`src/dataset/mot17.py::SPLIT`), por sequência: treino = 02, 04, 05,
+  11, 13; validação = 09 (câmera parada) e 10 (câmera móvel, noite). Toda escolha de
+  hiperparâmetro é feita só no treino.
+- **Avaliação no MOT17**: GT = pedestres com `conf = 1`; previsões casadas (Hungarian,
+  IoU ≥ 0,5) com distratores — classes 2, 7, 8, 12 — são removidas antes de contar, como
+  no avaliador oficial.
 - **Métricas** (`src/nn/metrics.py`): IDF1 com atribuição global 1-para-1 (Hungarian sobre
   a matriz de quadros casados); ID switch quando a identidade verdadeira troca de parceiro
   em relação ao **último** casamento; fragmentação quando uma identidade casada fica sem

@@ -270,13 +270,14 @@ class Tracker:
         iou_threshold: limiar fixo de associacao.
         max_age: quadros sem observacao antes de a track morrer.
         matching: "greedy" ou "hungarian".
-        min_score: deteccoes abaixo disto sao ignoradas.
+        min_score: deteccoes abaixo disto sao ignoradas (None = nenhuma;
+            o DPM do MOT17 tem scores negativos).
         min_hits: uma track so aparece na saida depois de `min_hits`
             observacoes (1 = aparece ja no nascimento).
     """
 
     def __init__(self, motion=None, iou_threshold=0.3, max_age=5, matching="greedy",
-                 min_score=0.0, min_hits=1):
+                 min_score=None, min_hits=1):
 
         self.motion = motion if motion is not None else StaticMotion()
         self.iou_threshold = iou_threshold
@@ -311,7 +312,7 @@ class Tracker:
         boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
         scores = np.ones(len(boxes)) if scores is None else np.asarray(scores, dtype=np.float64).reshape(-1)
 
-        keep = scores >= self.min_score
+        keep = np.ones(len(scores), dtype=bool) if self.min_score is None else scores >= self.min_score
         boxes, scores = boxes[keep], scores[keep]
 
         # 1. caixas previstas das tracks vivas
@@ -441,3 +442,22 @@ class Tracker:
         boxes = [p[2] for p in self.predictions]
 
         return make_table(frames, ids, boxes, np.ones(len(frames)))
+
+
+def track_sequence(detections, n_frames, motion=None, **tracker_kwargs):
+    """
+    Atalho: roda um Tracker novo em TODOS os quadros 0..n_frames-1 (os
+    quadros sem nenhuma deteccao tambem contam: as tracks envelhecem).
+
+    Args:
+        detections: tabela (N, 7) de deteccoes.
+        n_frames: numero de quadros da sequencia.
+        motion: modelo de movimento (padrao: StaticMotion, a Parte 1).
+        **tracker_kwargs: iou_threshold, max_age, matching, ...
+
+    Returns:
+        tabela (M, 7) de trajetorias previstas.
+    """
+
+    tracker = Tracker(motion if motion is not None else StaticMotion(), **tracker_kwargs)
+    return tracker.run(detections, frames=range(n_frames))
