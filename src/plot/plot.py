@@ -8,7 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-from src.nn.boxes import ID, X1, X2, Y2, CONF, split_by_frame
+from src.nn.boxes import FRAME, ID, X1, Y1, X2, Y2, CONF, split_by_frame
 
 
 _GOLDEN = 0.6180339887498949
@@ -510,4 +510,172 @@ def show_sequence_frames(seq, frames, gt=None, pred=None, crop=None, ncols=None,
         fig.suptitle(title)
 
     plt.tight_layout()
+    return fig
+
+
+def plot_gradient_curves(curves, ratio=0.05, ax=None, title=None):
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, 4))
+    else:
+        fig = ax.figure
+
+    for label, curve in curves.items():
+        k = np.arange(len(curve))
+        ax.semilogy(k, np.maximum(curve, 1e-8), marker=".", label=label)
+
+    ax.axhline(ratio, color="k", linestyle="--", alpha=0.5)
+    ax.text(0.5, ratio * 1.2, f"{ratio:.0%} de k = 0", fontsize=8)
+    ax.set_ylim(1e-6, 2)
+    ax.set_xlabel("k (passos para tras)")
+    ax.set_ylabel(r"$\|\partial L_t / \partial h_{t-k}\|$ (relativa a k = 0)")
+    ax.grid(alpha=0.3, which="both")
+    ax.legend(fontsize=8)
+
+    if title:
+        ax.set_title(title)
+
+    return fig
+
+
+def plot_memory_horizon(rates, occlusions, max_age=None, ax=None, title=None):
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 4))
+    else:
+        fig = ax.figure
+
+    occlusions = np.asarray(occlusions)
+    hist_ax = ax.twinx()
+    edges = np.arange(0, 64, 4)
+    hist_ax.hist(np.clip(occlusions, 0, edges[-1] - 1), bins=edges, color="0.8", alpha=0.6,
+                 label="oclusoes do GT")
+    hist_ax.set_ylabel("oclusoes do GT (contagem)", color="0.4")
+    ax.set_zorder(hist_ax.get_zorder() + 1)
+    ax.patch.set_visible(False)
+
+    for label, rows in rates.items():
+        centers = [r["gap_lo"] + 2 if r["gap_hi"] is None else (r["gap_lo"] + r["gap_hi"]) / 2 for r in rows]
+        ax.plot(centers, [r["keep_rate"] for r in rows], marker="o", label=label)
+
+    if max_age is not None:
+        ax.axvline(max_age + 0.5, color="k", linestyle="--", alpha=0.5)
+        ax.text(max_age + 1, 0.9, f"max_age = {max_age}", fontsize=8)
+
+    ax.set_xlim(0, edges[-1])
+    ax.set_ylim(-0.03, 1.03)
+    ax.set_xlabel("duracao do buraco / da oclusao (quadros; >= 60 na ultima barra)")
+    ax.set_ylabel("fracao das recapturas que mantem o id")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="upper right")
+
+    if title:
+        ax.set_title(title)
+
+    return fig
+
+
+def plot_failure_case(seq, case, pred, predicted, n_frames=6, margin=60, title=None):
+    gt = seq.gt
+    gid, t1, gap = case["gt_id"], case["frame"], case["gap"]
+    t0 = t1 - gap
+
+    if gap > 0:
+        inside = np.linspace(t0, t1 - 1, max(1, min(gap, n_frames - 3))).round().astype(int)
+        frames = sorted(set([t0 - 1, *inside.tolist(), t1, min(t1 + 3, seq.n_frames - 1)]))
+    else:
+        frames = list(range(max(t1 - 3 * (n_frames // 2), 0), t1 + 3 * (n_frames - n_frames // 2), 3))
+
+    focus_ids = [gid] + ([case["other_gt"]] if "other_gt" in case else [])
+    focus = gt[np.isin(gt[:, ID], focus_ids) & np.isin(gt[:, FRAME], frames)]
+    x1, y1 = focus[:, X1].min() - margin, focus[:, Y1].min() - margin
+    x2, y2 = focus[:, X2].max() + margin, focus[:, Y2].max() + margin
+    x1, y1, x2, y2 = max(x1, 0), max(y1, 0), min(x2, seq.width), min(y2, seq.height)
+
+    gt_by = split_by_frame(gt)
+    pred_by = split_by_frame(pred)
+    predicted_old = predicted[predicted[:, ID] == case["before"]]
+    predicted_by = split_by_frame(predicted_old)
+
+    fig = plt.figure(figsize=(2.6 * len(frames), 6.2))
+    grid = fig.add_gridspec(2, len(frames), height_ratios=[1.6, 1])
+
+    for k, t in enumerate(frames):
+
+        ax = fig.add_subplot(grid[0, k])
+
+        if seq.has_images:
+            ax.imshow(seq.image(t))
+        else:
+            ax.imshow(np.full((seq.height, seq.width, 3), 0.25))
+
+        if t in gt_by:
+            rows = gt_by[t]
+            draw_boxes(ax, rows[~np.isin(rows[:, ID], focus_ids)], color_by_id=False, color="white",
+                       linewidth=0.6, label_ids=False, alpha=0.6)
+            draw_boxes(ax, rows[np.isin(rows[:, ID], focus_ids)], color_by_id=False, color="white",
+                       linewidth=3, label_ids=False)
+
+        if t in pred_by:
+            draw_boxes(ax, pred_by[t], linestyle="--", linewidth=1.5)
+
+        if t in predicted_by:
+            draw_boxes(ax, predicted_by[t], linestyle=":", linewidth=2, label_ids=False)
+
+        vis = gt[(gt[:, ID] == gid) & (gt[:, FRAME] == t), CONF]
+        ax.set_title(f"t = {t}" + (f"  vis {vis[0]:.2f}" if len(vis) else ""), fontsize=8)
+        ax.set_xlim(x1, x2)
+        ax.set_ylim(y2, y1)
+        ax.axis("off")
+
+    ax = fig.add_subplot(grid[1, :])
+    lo, hi = max(t0 - 40, 0), t1 + 20
+
+    def cx(table, sel):
+        rows = table[sel & (table[:, FRAME] >= lo) & (table[:, FRAME] <= hi)]
+        rows = rows[np.argsort(rows[:, FRAME])]
+        return rows[:, FRAME], (rows[:, X1] + rows[:, X2]) / 2
+
+    ax.plot(*cx(gt, gt[:, ID] == gid), color="k", linewidth=2, label=f"GT id {gid}")
+    for pid in (case["before"], case["after"]):
+        ax.plot(*cx(pred, pred[:, ID] == pid), "o", markersize=3, color=id_color(pid), label=f"track {pid}")
+    ax.plot(*cx(predicted, predicted[:, ID] == case["before"]), ":", color=id_color(case["before"]),
+            linewidth=2, label=f"caixa prevista (track {case['before']})")
+
+    if gap > 0:
+        ax.axvspan(t0 - 0.5, t1 - 0.5, color="0.85", label="buraco")
+    ax.axvline(t1, color="r", alpha=0.4)
+    ax.set_xlabel("quadro")
+    ax.set_ylabel("centro x (px)")
+    ax.legend(fontsize=7, ncol=5, loc="best")
+    ax.grid(alpha=0.3)
+
+    fig.suptitle(title or f"{seq.name} -- {case['kind']}: GT {gid}, id {case['before']} -> {case['after']}"
+                 f" (buraco de {gap} quadros)", fontsize=10)
+    plt.tight_layout()
+    return fig
+
+
+def plot_stress(summary, levels, ax=None):
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 4))
+    else:
+        fig = ax.figure
+
+    x = np.arange(len(levels))
+    styles = ["-", "--", ":", "-."]
+
+    for (tracker, block), style in zip(summary.groupby(level=0), styles):
+        block = block.droplevel(0).reindex(levels)
+        ax.errorbar(x, block["IDF1"], yerr=block["IDF1_std"], color="C0", linestyle=style, marker="o",
+                    capsize=3, label=f"IDF1 -- {tracker}")
+        ax.plot(x, block["mAP_track"], color="C1", linestyle=style, marker="s", label=f"mAP trajetorias -- {tracker}")
+
+    first = summary.xs(summary.index.get_level_values(0)[0], level=0).reindex(levels)
+    ax.plot(x, first["mAP_det"], color="k", marker="^", label="mAP deteccoes (entrada)")
+
+    ax.set_xticks(x, levels)
+    ax.set_xlabel("degradacao do detector")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=7)
+
     return fig
