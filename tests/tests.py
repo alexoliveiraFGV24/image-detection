@@ -514,7 +514,8 @@ class TestPart4(unittest.TestCase):
         self.assertAlmostEqual(crossing(rates), 2.0)
 
     def test_free_running_model_keeps_shape(self):
-        model = MotionModel(hidden_size=8, use_conf=False, use_dt=False)
+        from src.nn.gt_motion import GTMotionModel
+        model = GTMotionModel(hidden_size=8, use_conf=False, use_dt=False)
         boxes = torch.rand(2, 10, 4)
         observed = torch.ones(2, 10, 1)
         observed[:, 4:] = 0

@@ -2,12 +2,12 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from src.dataset.trajectories import collate_trajectories
+from src.dataset.gt_trajectories import collate_trajectories
 from src.nn.boxes import ID, FRAME, X1, Y2, CONF, box_iou_matrix, cxcywh_to_xyxy
 from src.nn.loss import make_box_loss
 from src.nn.metrics import reacquisition_events, keep_rate_by_gap
-from src.nn.models import gradient_norm_through_time
-from src.nn.tracking import Tracker, RNNMotion, StaticMotion
+from src.nn.gt_motion import GTRNNMotion, gradient_norm_through_time
+from src.nn.tracking import Tracker, StaticMotion
 from src.nn.train import trajectory_dataset
 
 
@@ -68,7 +68,7 @@ def free_running_iou(model, seqs, warmup=8, horizon=40):
 # ----------
 def run_tracker(seq, model=None, detector="SDP", min_score=0.9, detections=None, **tracker_kwargs):
     det = detections if detections is not None else seq.public_detections(detector, min_score=min_score)
-    motion = StaticMotion() if model is None else RNNMotion(model, seq.image_size)
+    motion = StaticMotion() if model is None else GTRNNMotion(model, seq.image_size)
 
     tracker = Tracker(motion, **{**TRACKER, **tracker_kwargs})
     pred = tracker.run(det, frames=range(seq.n_frames))

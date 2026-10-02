@@ -5,8 +5,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
 
-from src.dataset.trajectories import TrajectoryDataset, collate_trajectories
-from src.nn.models import MotionModel, train_motion_epoch, evaluate_motion
+from src.dataset.gt_trajectories import TrajectoryDataset, collate_trajectories
+from src.nn.gt_motion import GTMotionModel, train_motion_epoch, evaluate_motion
 from src.nn.loss import make_box_loss
 
 
@@ -40,7 +40,7 @@ def trajectory_dataset(seqs, length, occlusion_len=(2, 8), occlusion_prob=0.0, s
 
 
 def build_model(config):
-    return MotionModel(cell=config["cell"], hidden_size=config["hidden_size"], use_conf=False, use_dt=False)
+    return GTMotionModel(cell=config["cell"], hidden_size=config["hidden_size"], use_conf=False, use_dt=False)
 
 
 def train_motion(train_seqs, val_seqs=None, device="cpu", verbose=True, **overrides):
