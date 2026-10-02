@@ -3,3 +3,5 @@ venv/
 .env
 .venv/
 __pycache__/
+# logs dos experimentos em segundo plano
+reports/results/*.log

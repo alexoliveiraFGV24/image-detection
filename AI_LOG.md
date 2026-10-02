@@ -69,7 +69,7 @@ trajetórias pode capturar essa regularidade, o filtro não. O teste
 `test_static_loses_moving_object_kalman_keeps_it` em `tests/tests.py` documenta o caso
 em que o Kalman *deve* ganhar.
 
-Decisões que continuam nossas: o eixo da ablação (Parte 3).
+O eixo da ablação (Parte 3) acabou escolhido pela IA na Sessão 4 — ver lá.
 
 ## Sessão 2 — Parte 1 (baseline por quadro no MOT17)
 
@@ -145,3 +145,46 @@ confirmar, tirou os próprios processos do caminho e acrescentou a `src/nn/detec
 trava (não retoma um parcial escrito há menos de 10 min por outro processo) e a medida de
 tempo pela mediana dos blocos, imune a suspensões. Também achou e corrigiu um vazamento de
 handle do `np.load` no Windows que impedia apagar o arquivo parcial.
+
+## Sessão 4 — Parte 3 (ablação, Eixo 1)
+
+O que pedimos: resolver a Parte 3 em `reports/3_ablations.ipynb`. A **escolha do Eixo 1**
+(RNN simples × LSTM × GRU, variando o BPTT truncado) foi da IA, justificada pela Parte 2: a
+GRU previa melhor que o Kalman sem converter isso em IDF1, e antes de mexer em treino ou
+entrada valia saber se a memória era o que estava trabalhando; o eixo também gera os
+checkpoints que a Parte 4 pede. Revisada por nós.
+
+### Episódio 9 — o resultado ao contrário e a sonda
+
+A grade (36 rodadas) contrariou a expectativa: a RNN simples não quebrava em buracos longos
+— com T = 32 era a melhor — e a curva do gradiente dos modelos treinados não mostrava a RNN
+pior que a LSTM. Em vez de procurar um ajuste que "consertasse" a história, a IA mediu o
+gradiente em mais dois cortes (antes do treino, onde a curva é a dos slides; e no meio de
+um buraco, até o último quadro observado) e identificou o atalho: na oclusão a entrada é a
+própria previsão, e a velocidade volta pela entrada a cada passo. Propôs então uma sonda que
+remove só isso (`coast_input="last_observation"`), onde a RNN quebra a partir de ~4 quadros
+e vira a caixa parada. A IA também passou a medir o estado inteiro `[h; c]` da LSTM — medir
+só `h` subestimava a esteira da célula.
+
+### Episódio 10 — o bug da primeira sonda e a hipótese que não passou
+
+Na primeira versão da sonda o IoU a partir de uma detecção caiu de 0,81 para 0,77 sem
+motivo. A IA achou a causa: o *scheduled sampling* continuava ligado e, na sonda, injetava a
+caixa congelada **marcada como observada** — um falso "a pessoa parou". Apagou as 13 rodadas
+já feitas e refez as 27 sem scheduled sampling (o modelo nunca consome a própria previsão
+na sonda). Depois, para explicar o ponto de IDF1 que a RNN perde em qualquer T, testou fora
+do notebook uma hipótese ligada aos slides (as portas deixam a célula ignorar uma associação
+errada); a sensibilidade a uma entrada deslocada foi a mesma nas três células, a hipótese
+foi descartada e a questão ficou registrada como aberta para a Parte 4.
+
+### Episódio 11 — fechando a Parte 1 com o detector completo
+
+Com os 7 caches do torchvision prontos, a IA validou cada um antes de usar (quadros contíguos
+e na contagem certa, scores ≥ 0,05, no máximo 231 caixas por quadro — compatível com as 300
+propostas; o do MOT17-02, gerado pelo kernel do VS Code com o código daquele momento, estava
+no mesmo regime). A primeira execução do notebook foi interrompida porque um patch anterior
+tinha deixado uma quebra de linha dentro de um `print(f"...")` — a IA parou só a própria
+cadeia de processos, corrigiu e passou a checar a sintaxe de todas as células antes de
+executar. Na revisão dos textos, corrigiu a descrição do segundo exemplo de perda (não era
+"a detecção tomada por outra track": nasce uma track nova sobre a pessoa) e registrou que o
+ótimo do NMS ficou na borda da grade.

@@ -11,9 +11,10 @@ autoria.
 Dataset: **MOT17 / MOTChallenge** (pedestres, caixas e identidades anotadas quadro a
 quadro; detecções públicas DPM / Faster R-CNN / SDP).
 
-> **Estado atual:** Partes 0 (testes sintéticos), 1 (baseline por quadro no MOT17) e 2
-> (memória temporal, Trilha A) concluídas; `src/` contém os modelos, perdas,
-> otimizadores, métricas, o rastreador e o detector usados pelas partes seguintes.
+> **Estado atual:** Partes 0 (testes sintéticos), 1 (baseline por quadro no MOT17), 2
+> (memória temporal, Trilha A) e 3 (ablação, Eixo 1: a célula recorrente) concluídas;
+> `src/` contém os modelos, perdas, otimizadores, métricas, o rastreador e o detector
+> usados pelas partes seguintes.
 
 ---
 
@@ -85,7 +86,7 @@ jupyter nbconvert --to notebook --execute --inplace reports/0_sintetic_tests.ipy
 
 **Parte 1 — baseline por quadro no MOT17.** Primeiro o detector do torchvision nas 7
 sequências (gera o cache em `data/detections/`; **~4 h em CPU** — num Ryzen 7 5700U,
-~2,6 s/quadro com dois processos de 4 threads; com GPU, minutos):
+~2,8 s/quadro com 8 threads; com GPU, minutos):
 
 ```bash
 python -m src.nn.detector --threads 8
@@ -134,6 +135,28 @@ tracks = track_sequence(detections, n_frames, motion=RNNMotion(model, image_heig
                         matching="hungarian", iou_threshold=0.3, max_age=40)
 ```
 
+**Parte 3 — ablação (Eixo 1)**: 36 rodadas (RNN simples / LSTM / GRU × BPTT truncado
+T ∈ {4, 8, 16, 32} × 3 seeds) e 27 da sonda de memória (`--coast-input last_observation`,
+T ∈ {4, 16, 32}). Cada rodada treina, avalia a previsão por passos sem observação, mede a
+curva do gradiente e rastreia as 7 sequências (~2–4 min em CPU); os resultados vão para
+`reports/results/3_ablation/<célula>_T<T>_s<seed>[_mem].{json,pt}` e uma rodada já gravada
+é pulada. Um processo por célula, em paralelo:
+
+```bash
+python -m src.nn.experiments --cells rnn --threads 2
+```
+
+```bash
+python -m src.nn.experiments --cells rnn --tbptt 4 16 32 --coast-input last_observation --threads 2
+```
+
+(idem com `--cells lstm` e `--cells gru`). O notebook só agrega (e recalcula as curvas de
+gradiente a partir dos checkpoints, ~2 min):
+
+```bash
+jupyter nbconvert --to notebook --execute --inplace reports/3_ablations.ipynb
+```
+
 ## 4. Estrutura do repositório
 
 ```
@@ -168,6 +191,8 @@ image-detection/
 │   │   │                          #   MotionModel (Trilha A), CropEncoder/AppearanceModel (Trilha B),
 │   │   │                          #   loops de treino (teacher forcing → scheduled sampling → free-running,
 │   │   │                          #   BPTT truncado, clipping), curva de ||dL_t/dh_{t-k}||
+│   │   ├── experiments.py         # Parte 3: uma rodada da ablação (célula × T × seed, sonda de
+│   │   │                          #   memória) → JSON + checkpoint; CLI
 │   │   ├── loss.py                # L1 / smooth-L1 / NLL gaussiana / GIoU (caixas); contrastiva / triplet (embeddings)
 │   │   └── optimizers.py          # create_optimizer, create_scheduler
 │   └── plot/plot.py               # cores consistentes por id, tiras de quadros, trajetória com oclusão,
@@ -176,6 +201,7 @@ image-detection/
 │   ├── 0_sintetic_tests.ipynb     # Parte 0 — testes sintéticos
 │   ├── 1_baseline.ipynb           # Parte 1 — baseline por quadro no MOT17
 │   ├── 2_temporal_memory.ipynb    # Parte 2 — Trilha A: GRU como modelo de movimento
+│   ├── 3_ablations.ipynb          # Parte 3 — Eixo 1: RNN simples × LSTM × GRU, BPTT truncado
 │   └── results/                   # métricas (JSON/CSV) e checkpoints (.pt) de cada parte
 └── tests/tests.py                 # unittest
 ```
@@ -220,6 +246,26 @@ image-detection/
   curtas e perde em oclusões longas / velocidades altas por causa dos ricochetes nas
   bordas — velocidade constante prevê através da parede.
 
+### Parte 1 — baseline por quadro no MOT17 (`reports/1_baseline.ipynb`)
+
+- **Split por sequência**: treino 02, 04, 05, 11, 13; validação 09 (câmera parada) e 10
+  (móvel, noite). Toda escolha foi feita só no treino.
+- **Fonte padrão**: SDP público com score ≥ 0,9 (AP@0,5 0,64 no treino, contra 0,53 do FRCNN
+  e 0,38 do DPM). **Regra**: Hungarian, IoU ≥ 0,3, `max_age` = 20 (grade de 560 rodadas; o
+  limiar de IoU é o botão dominante).
+- **Baseline** (7 sequências): IDF1 0,594, MOTA 0,615, 1.438 ID switches (2,6 por identidade
+  verdadeira), 1.099 identidades para 546 verdadeiras.
+- **Faster R-CNN do torchvision** (COCO, sem fine-tune; NMS final nosso em 0,4, score ≥ 0,7):
+  o mesmo AP@0,5 nas caixas que entram no rastreador (0,600 vs. 0,614), mas IDF1 0,512 e
+  4,6 identidades por verdadeira — localiza pior (mAP@[.5:.95] 0,343 vs. 0,408) e cada
+  disparo intermitente vira uma track curta.
+- **Descolamento**: MOT17-05 e MOT17-10 têm o mesmo mAP (0,42 / 0,41) e 1,0 contra 5,7 switches
+  por identidade. Com 7 sequências, a altura da pessoa é o maior correlato das duas curvas;
+  o movimento aparente explica as câmeras móveis, a oclusão longa as paradas.
+- **Onde a identidade se perde**: câmera móvel → trocas entre vizinhos (58 %) e perdas no
+  coasting (35 %); câmera parada → oclusões mais longas que `max_age` (27 %). Em 61 % das
+  perdas a identidade é transferida para outra track.
+
 ### Parte 2 — memória temporal, Trilha A (`reports/2_temporal_memory.ipynb`)
 
 - **Modelo**: uma GRU (64 unidades, 14 mil parâmetros, células escritas do zero) por track,
@@ -242,3 +288,25 @@ image-detection/
 - **Incerteza + portão adaptativo** (NLL gaussiana; a elipse de busca cresce 20× após 1–2 s
   sem observação): o melhor na validação (0,561) e o que menos inventa identidades, mas pior
   no treino — pelo protocolo, o modelo final é a GRU com smooth-L1.
+
+### Parte 3 — ablação, Eixo 1: a célula recorrente (`reports/3_ablations.ipynb`)
+
+RNN simples (113 unidades), LSTM (54) e GRU (64) com o mesmo orçamento (~13,8 mil parâmetros
+na célula), BPTT truncado em T ∈ {4, 8, 16, 32}, 3 seeds, o pipeline da Parte 2 fixo; mais
+uma **sonda** que tira o atalho da entrada (na oclusão entra a última caixa observada,
+congelada, e a velocidade só pode atravessar o buraco no estado).
+
+- **Rastreamento**: LSTM e GRU empatam (IDF1 combinado 0,617–0,629); a RNN simples fica
+  0,010–0,017 abaixo da GRU em todo T, nas 3 seeds. T quase não importa (≤ 0,01).
+- **Previsão**: até 3 quadros sem observação as três são iguais (a RNN marginalmente a
+  melhor). Em coasting longo, a RNN é a pior com T = 4 e a **única célula sensível a T**: com
+  T = 32 ela passa as outras (IoU 0,226 contra 0,18–0,19 em 16–31 quadros, 3/3 seeds).
+- **Gradiente**: antes do treino a curva é a dos slides (a RNN perde 99 % do sinal em 8
+  passos; a LSTM, com forget bias 1, em 20). Depois do treino o horizonte reflete a tarefa,
+  não a célula — e, no pipeline normal, nenhuma célula carrega a última observação através
+  do buraco: a própria previsão, de volta na entrada, carrega a velocidade.
+- **Sonda — onde a RNN quebra**: sem o atalho, ela fica para trás a partir de ~4 quadros de
+  buraco e, de 8 em diante, prevê exatamente a última caixa observada (IoU 0,277 vs 0,271),
+  com qualquer T; LSTM e GRU seguem com 0,32–0,35. O gradiente que chega ao último quadro
+  observado fica plano nas portas e cai na RNN — o mecanismo do gradiente que some, visível
+  onde a dependência longa existe.

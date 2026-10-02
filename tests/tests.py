@@ -358,6 +358,48 @@ class TestModels(unittest.TestCase):
         b = model(boxes[:, 4:], observed[:, 4:], state=a["state"], prev_input=a["last_input"], prev_pred=a["last_pred"])
         torch.testing.assert_close(torch.cat([a["box"], b["box"]], dim=1), full["box"])
 
+    def test_coast_last_observation_freezes_input(self):
+        """Sonda de memoria: sob oclusao entra a ultima caixa observada, congelada."""
+        torch.manual_seed(0)
+        model = MotionModel("rnn", hidden_size=16, coast_input="last_observation").eval()
+        boxes = self._random_boxes(1, 7)
+        observed = torch.ones(1, 7, 1)
+        observed[:, 2:5] = 0
+        out = model(boxes, observed=observed)
+        for t in range(2, 5):
+            torch.testing.assert_close(out["input"][:, t], boxes[:, 1])
+        torch.testing.assert_close(out["input"][:, 5], boxes[:, 5])
+        with self.assertRaises(ValueError):
+            MotionModel("rnn", hidden_size=4, coast_input="nada")
+
+    def test_gradient_through_time_state_and_per_sample(self):
+        from src.nn.loss import make_box_loss
+        from src.nn.models import gradient_norm_through_time
+        torch.manual_seed(0)
+        B, T = 3, 10
+        batch = {"inputs": self._random_boxes(B, T), "observed": torch.ones(B, T, 1), "dt": torch.ones(B, T, 1),
+                 "valid": torch.ones(B, T)}
+        batch["boxes"] = batch["inputs"].clone()
+        loss_fn = make_box_loss("smooth_l1", beta=0.1)
+
+        gru = MotionModel("gru", hidden_size=8)
+        h_only = gradient_norm_through_time(gru, batch, loss_fn, "cpu")
+        self.assertEqual(h_only.shape, (T - 1,))
+        np.testing.assert_allclose(gradient_norm_through_time(gru, batch, loss_fn, "cpu", full_state=True), h_only)
+
+        # na LSTM o estado inteiro inclui c: a norma so pode crescer
+        lstm = MotionModel("lstm", hidden_size=8)
+        h_l = gradient_norm_through_time(lstm, batch, loss_fn, "cpu")
+        full_l = gradient_norm_through_time(lstm, batch, loss_fn, "cpu", full_state=True)
+        self.assertTrue(np.all(full_l >= h_l - 1e-9))
+        self.assertTrue(np.any(full_l[1:] > h_l[1:]))
+
+        # um passo de perda por janela: NaN alem do inicio da janela
+        per = gradient_norm_through_time(gru, batch, loss_fn, "cpu", t_loss=torch.tensor([2, 5, 8]), per_sample=True)
+        self.assertEqual(per.shape, (B, 9))
+        self.assertTrue(np.isnan(per[0, 3:]).all() and np.isfinite(per[0, :3]).all())
+        self.assertTrue(np.isfinite(per[2]).all())
+
     def test_rnn_motion_in_tracker(self):
         """O adaptador em lote roda no Tracker e devolve caixas validas."""
         from src.nn.tracking import RNNMotion
@@ -371,6 +413,10 @@ class TestModels(unittest.TestCase):
                                        return_tracker=True, gate=9.49)
         self.assertEqual(len(pred), len(det))
         self.assertTrue(np.isfinite(tracker.predicted_boxes_table()).all())
+
+        frozen = RNNMotion(MotionModel("rnn", hidden_size=8, coast_input="last_observation"), image_height=128)
+        pred = track_sequence(det, 15, motion=frozen, iou_threshold=0.3, max_age=10)
+        self.assertEqual(len(pred), len(det))
 
     def test_losses(self):
         pred = torch.zeros(2, 3, 4, requires_grad=True)

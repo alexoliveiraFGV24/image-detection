@@ -463,11 +463,20 @@ class MotionModel(nn.Module):
         cell, hidden_size, num_layers, bidirectional: ver Recurrent.
         predict_uncertainty: acrescenta as 4 saidas de log-variancia.
         use_dt: inclui dt na entrada.
+        coast_input: o que entra sob oclusao. "prediction" (padrao) e a
+            propria previsao -- a velocidade volta pela entrada a cada
+            passo. "last_observation" congela a ultima caixa observada
+            (delta de entrada zero): a velocidade so sobrevive no ESTADO e
+            a saida passa a ser o deslocamento acumulado desde a ultima
+            observacao. E a sonda de memoria da Parte 3.
     """
 
     def __init__(self, cell="gru", hidden_size=64, num_layers=1, bidirectional=False,
-                 predict_uncertainty=False, use_dt=True):
+                 predict_uncertainty=False, use_dt=True, coast_input="prediction"):
         super().__init__()
+
+        if coast_input not in ("prediction", "last_observation"):
+            raise ValueError(f"coast_input desconhecido: {coast_input}")
 
         self.kind = cell
         self.hidden_size = hidden_size
@@ -475,6 +484,7 @@ class MotionModel(nn.Module):
         self.bidirectional = bidirectional
         self.predict_uncertainty = predict_uncertainty
         self.use_dt = use_dt
+        self.coast_input = coast_input
 
         self.input_size = 4 + 1 + 1 + int(use_dt)
 
@@ -492,7 +502,7 @@ class MotionModel(nn.Module):
         return {
             "cell": self.kind, "hidden_size": self.hidden_size, "num_layers": self.num_layers,
             "bidirectional": self.bidirectional, "predict_uncertainty": self.predict_uncertainty,
-            "use_dt": self.use_dt,
+            "use_dt": self.use_dt, "coast_input": self.coast_input,
         }
 
     # --------------------------------------------------------
@@ -556,7 +566,8 @@ class MotionModel(nn.Module):
             {"box": (B, T, 4) previsao da caixa de t+1 feita em t,
              "delta": (B, T, 4), "log_var": (B, T, 4) ou None,
              "input": (B, T, 4) a caixa que de fato entrou em cada passo,
-             "state", "last_input", "last_pred", "hiddens"}
+             "state", "last_input", "last_pred", "hiddens",
+             "cell_states": os c_t da LSTM (vazio nas outras celulas)}
         """
 
         B, T, _ = inputs.shape
@@ -582,7 +593,7 @@ class MotionModel(nn.Module):
 
         state = list(state)
 
-        deltas, log_vars, used, preds, hiddens = [], [], [], [], []
+        deltas, log_vars, used, preds, hiddens, cell_states = [], [], [], [], [], []
 
         for t in range(T):
 
@@ -597,7 +608,8 @@ class MotionModel(nn.Module):
                 use_pred = obs_t < 0.5
                 if sampling_prob > 0:
                     use_pred = use_pred | (torch.rand(B, 1, device=device) < sampling_prob)
-                box_in = torch.where(use_pred, prev_pred.detach(), given)
+                fallback = prev_pred.detach() if self.coast_input == "prediction" else prev_input
+                box_in = torch.where(use_pred, fallback, given)
                 prev = prev_input
 
             x = self.features(box_in, prev, obs_t, dt[:, t] if dt is not None else None)
@@ -606,6 +618,10 @@ class MotionModel(nn.Module):
             if keep_hidden:
                 h.retain_grad()
                 hiddens.append(h)
+                memory = state[-1]
+                if isinstance(memory, (tuple, list)):       # LSTM: a celula c tambem e estado
+                    memory[1].retain_grad()
+                    cell_states.append(memory[1])
 
             delta, log_var = self._split_head(self.head(h))
             pred = decode_delta(box_in, delta)
@@ -629,6 +645,7 @@ class MotionModel(nn.Module):
             "last_input": prev_input,
             "last_pred": prev_pred,
             "hiddens": hiddens,
+            "cell_states": cell_states,
         }
 
 
@@ -1076,7 +1093,8 @@ def train_appearance_epoch(model, dataloader, optimizer, loss_fn, device, clip_g
 # ============================================================
 
 
-def gradient_norm_through_time(model, batch, loss_fn, device, t_loss=None, sampling_prob=0.0):
+def gradient_norm_through_time(model, batch, loss_fn, device, t_loss=None, sampling_prob=0.0,
+                               full_state=False, per_sample=False):
     """
     A curva do gradiente que some (slide 52), no SEU modelo e nos SEUS
     dados: roda a sequencia guardando os h_t, computa a perda SO no
@@ -1086,10 +1104,17 @@ def gradient_norm_through_time(model, batch, loss_fn, device, t_loss=None, sampl
         model: MotionModel (causal).
         batch: um batch como o de train_motion_epoch.
         loss_fn: a mesma do treino.
-        t_loss: passo onde a perda e medida (padrao: o penultimo).
+        t_loss: passo onde a perda e medida (padrao: o penultimo). Pode ser
+            um tensor (B,) com um passo por janela -- as janelas sao
+            independentes, entao cada uma tem a propria curva.
+        full_state: na LSTM, mede o estado inteiro [h; c] -- o caminho pela
+            celula c (a "esteira" do forget gate) nao passa por h_{t-k}.
+            Nas outras celulas o estado e so h e nada muda.
+        per_sample: devolve a curva de cada janela em vez da media.
 
     Returns:
-        np.ndarray (t_loss + 1,) com a norma media para k = 0..t_loss.
+        np.ndarray (t_max + 1,) com a norma media para k = 0..t_max, ou
+        (B, t_max + 1) se per_sample (NaN onde k > t_loss da janela).
     """
 
     import numpy as np
@@ -1098,10 +1123,14 @@ def gradient_norm_through_time(model, batch, loss_fn, device, t_loss=None, sampl
     batch = _to_device(batch, device)
 
     boxes = batch["boxes"]
-    T = boxes.shape[1]
+    B, T = boxes.shape[:2]
 
     if t_loss is None:
         t_loss = T - 2
+
+    t_loss = torch.as_tensor(t_loss, device=boxes.device).long().expand(B).clone()
+    rows = torch.arange(B, device=boxes.device)
+    t_max = int(t_loss.max())
 
     model.zero_grad()
 
@@ -1109,19 +1138,29 @@ def gradient_norm_through_time(model, batch, loss_fn, device, t_loss=None, sampl
 
         out = model(batch["inputs"], batch["observed"], batch["dt"], sampling_prob=sampling_prob, keep_hidden=True)
 
-        target = encode_delta(boxes[:, t_loss + 1:t_loss + 2], out["input"][:, t_loss:t_loss + 1])
-        mask = batch["valid"][:, t_loss + 1:t_loss + 2]
-        log_var = out["log_var"][:, t_loss:t_loss + 1] if out["log_var"] is not None else None
+        target = encode_delta(boxes[rows, t_loss + 1], out["input"][rows, t_loss])[:, None]
+        mask = batch["valid"][rows, t_loss + 1][:, None]
+        log_var = out["log_var"][rows, t_loss][:, None] if out["log_var"] is not None else None
 
-        loss = loss_fn(out["delta"][:, t_loss:t_loss + 1], target, log_var=log_var, mask=mask)
+        loss = loss_fn(out["delta"][rows, t_loss][:, None], target, log_var=log_var, mask=mask)
         loss.backward()
 
-    norms = np.zeros(t_loss + 1)
+    groups = [out["hiddens"]] + ([out["cell_states"]] if full_state and out["cell_states"] else [])
 
-    for k in range(t_loss + 1):
-        grad = out["hiddens"][t_loss - k].grad
-        norms[k] = float(grad.norm(dim=-1).mean()) if grad is not None else 0.0
+    # ||dL / d estado||^2 em cada (janela, passo)
+    sq = sum((torch.stack([s.grad if s.grad is not None else torch.zeros_like(s) for s in states], dim=1) ** 2).sum(dim=-1)
+             for states in groups)
+    sq = sq.detach().cpu().numpy()
+    t_loss = t_loss.cpu().numpy()
+
+    norms = np.full((B, t_max + 1), np.nan)
+
+    for b in range(B):
+        norms[b, :t_loss[b] + 1] = np.sqrt(sq[b, t_loss[b]::-1])
 
     model.zero_grad()
 
-    return norms
+    if per_sample:
+        return norms
+
+    return np.nanmean(norms, axis=0)

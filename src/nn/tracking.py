@@ -289,8 +289,13 @@ class RNNMotion(MotionModelBase):
         if len(states) == 0:
             return states
 
-        # free-running: a entrada e a propria previsao, sem observacao
-        own = np.stack([s["pred"] for s in states])
+        # free-running: a entrada e a propria previsao, sem observacao (ou a
+        # ultima caixa observada, congelada, na sonda de memoria da Parte 3)
+        if getattr(self.model, "coast_input", "prediction") == "last_observation":
+            own = np.stack([s["last_input"] for s in states])
+        else:
+            own = np.stack([s["pred"] for s in states])
+
         return self._run(states, own, np.zeros(len(states)), t)
 
     def gate_distance_many(self, states, boxes):
