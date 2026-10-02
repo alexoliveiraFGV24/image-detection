@@ -5,8 +5,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
 
-from src.dataset.gt_trajectories import TrajectoryDataset, collate_trajectories
-from src.nn.gt_motion import GTMotionModel, train_motion_epoch, evaluate_motion
+from src.dataset.trajectories import TrajectoryDataset, DetectionNoise, extract_trajectories
+from src.nn.models import MotionModel, train_motion_epoch, evaluate_motion, save_motion_model, load_motion_model
 from src.nn.loss import make_box_loss
 
 
@@ -33,14 +33,16 @@ CORRECTED_CONFIG = {
 
 
 def trajectory_dataset(seqs, length, occlusion_len=(2, 8), occlusion_prob=0.0, seed=0):
+    noise = DetectionNoise(sigma=(0.0, 0.0, 0.0, 0.0), occlusion_prob=occlusion_prob, occlusion_len=tuple(occlusion_len)) if occlusion_prob > 0 else None
+
     return ConcatDataset([
-        TrajectoryDataset(s.gt, s.image_size, length=length, stride=length // 2, occlusion_prob=occlusion_prob, occlusion_len=tuple(occlusion_len), seed=seed + k)
+        TrajectoryDataset(extract_trajectories(s.gt, s.height, fps=s.fps, sequence=s.name), length=length, stride=length // 2, noise=noise, fixed=noise is None, seed=seed + k)
         for k, s in enumerate(seqs)
     ])
 
 
 def build_model(config):
-    return GTMotionModel(cell=config["cell"], hidden_size=config["hidden_size"], use_conf=False, use_dt=False)
+    return MotionModel(cell=config["cell"], hidden_size=config["hidden_size"], use_dt=False)
 
 
 def train_motion(train_seqs, val_seqs=None, device="cpu", verbose=True, **overrides):
@@ -50,12 +52,12 @@ def train_motion(train_seqs, val_seqs=None, device="cpu", verbose=True, **overri
     np.random.seed(config["seed"])
 
     train_ds = trajectory_dataset(train_seqs, config["length"], config["occlusion_len"], config["occlusion_prob"], config["seed"])
-    loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True, collate_fn=collate_trajectories)
+    loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True)
 
     val_loader = None
     if val_seqs:
         val_ds = trajectory_dataset(val_seqs, config["length"])
-        val_loader = DataLoader(val_ds, batch_size=256, collate_fn=collate_trajectories)
+        val_loader = DataLoader(val_ds, batch_size=256)
 
     model = build_model(config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
@@ -72,7 +74,7 @@ def train_motion(train_seqs, val_seqs=None, device="cpu", verbose=True, **overri
         row = {"epoch": epoch + 1, "train_loss": loss, "grad_norm": norm}
 
         if val_loader is not None:
-            row["val_l1"] = evaluate_motion(model, val_loader, loss_fn, device)[1]
+            row["val_iou"] = float(evaluate_motion(model, val_loader, loss_fn, device)["iou"].mean())
 
         history.append(row)
 
@@ -84,14 +86,12 @@ def train_motion(train_seqs, val_seqs=None, device="cpu", verbose=True, **overri
 
 def save_model(model, config, path):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    torch.save({"config": config, "state_dict": model.state_dict()}, path)
+    save_motion_model(model, path, train_config=config)
 
 
 def load_model(path, device="cpu"):
-    ckpt = torch.load(path, map_location=device)
-    model = build_model(ckpt["config"])
-    model.load_state_dict(ckpt["state_dict"])
-    return model.to(device).eval(), ckpt["config"]
+    model, ckpt = load_motion_model(path, device)
+    return model, ckpt["train_config"]
 
 
 def load_or_train(path, train_seqs, val_seqs=None, device="cpu", **overrides):
