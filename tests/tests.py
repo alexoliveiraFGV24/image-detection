@@ -32,6 +32,8 @@ from src.nn.metrics import reacquisition_events, keep_rate_by_gap
 from src.nn.tracking import track_sequence
 from src.nn.detector import apply_nms
 from src.dataset.mot17 import remove_distractor_matches, occlusion_durations, consecutive_iou
+from src.analysis.memory import crossing
+from src.analysis.stress import degrade_detections
 
 
 # ------------------------------------------------------------
@@ -410,6 +412,34 @@ class TestPart1(unittest.TestCase):
         gt[(gt[:, 0] >= 5) & (gt[:, 0] < 9), 6] = 0.0               # 4 quadros invisivel, volta
         self.assertEqual(occlusion_durations(gt, max_visibility=0.25).tolist(), [4])
         np.testing.assert_allclose(consecutive_iou(gt), 1.0)        # parado: IoU 1 entre quadros
+
+
+class TestPart4(unittest.TestCase):
+
+    def test_crossing_interpolates_50_percent(self):
+        rates = [{"gap_lo": 1, "gap_hi": 1, "keep_rate": 0.9}, {"gap_lo": 3, "gap_hi": 3, "keep_rate": 0.1}]
+        self.assertAlmostEqual(crossing(rates), 2.0)
+
+    def test_free_running_model_keeps_shape(self):
+        model = MotionModel(hidden_size=8, use_conf=False, use_dt=False)
+        boxes = torch.rand(2, 10, 4)
+        observed = torch.ones(2, 10, 1)
+        observed[:, 4:] = 0
+        self.assertEqual(model(boxes, observed=observed)["box"].shape, (2, 10, 4))
+
+
+class TestPart5(unittest.TestCase):
+
+    def test_degrade_detections(self):
+        det = straight_tracks(n_ids=3, n_frames=50, speed=1.0)
+        det[:, 1] = -1
+        det = det[np.argsort(det[:, 0], kind="stable")]
+        self.assertTrue(np.allclose(degrade_detections(det, image_size=(1000, 1000), n_frames=50), det))
+        out = degrade_detections(det, drop=0.5, fp_per_frame=2.0, image_size=(1000, 1000), n_frames=50, seed=0)
+        n_kept = len(out) - np.sum(~np.isin(out[:, 2], det[:, 2]))
+        self.assertLess(n_kept, len(det))
+        self.assertGreater(len(out), n_kept)
+        self.assertTrue(np.all(out[:, 4] <= 1000) and np.all(out[:, 2] >= 0))
 
 
 if __name__ == "__main__":
