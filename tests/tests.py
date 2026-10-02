@@ -514,8 +514,9 @@ class TestPart4(unittest.TestCase):
         self.assertAlmostEqual(crossing(rates), 2.0)
 
     def test_free_running_model_keeps_shape(self):
-        model = MotionModel(hidden_size=8, use_conf=False, use_dt=False)
-        boxes = torch.rand(2, 10, 4)
+        from src.nn.models import MotionModel
+        model = MotionModel(hidden_size=8, use_dt=False)
+        boxes = torch.rand(2, 10, 4) + 0.1
         observed = torch.ones(2, 10, 1)
         observed[:, 4:] = 0
         self.assertEqual(model(boxes, observed=observed)["box"].shape, (2, 10, 4))

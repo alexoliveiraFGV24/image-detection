@@ -1,0 +1,188 @@
+{
+ "levels": {
+  "limpo": {
+   "drop": 0.0,
+   "noise": 0.0,
+   "fp_per_frame": 0.0
+  },
+  "leve": {
+   "drop": 0.1,
+   "noise": 0.02,
+   "fp_per_frame": 0.5
+  },
+  "media": {
+   "drop": 0.2,
+   "noise": 0.05,
+   "fp_per_frame": 1.5
+  },
+  "pesada": {
+   "drop": 0.4,
+   "noise": 0.1,
+   "fp_per_frame": 3.0
+  }
+ },
+ "seeds": [
+  0,
+  1,
+  2
+ ],
+ "model": "results/4_motion_gru_long_s0.pt",
+ "summary": [
+  {
+   "tracker": "GRU",
+   "level_1": "limpo",
+   "mAP_det": 0.4242534027677862,
+   "mAP_track": 0.4242546806461608,
+   "IDF1": 0.5730254580128081,
+   "IDSW_per_gt_id": 2.9608636977058027,
+   "id_ratio": 2.102901484480432,
+   "IDF1_std": 0.0,
+   "drop_mAP_det": 0.0,
+   "drop_IDF1": 0.0,
+   "amplificacao": NaN
+  },
+  {
+   "tracker": "GRU",
+   "level_1": "leve",
+   "mAP_det": 0.34787592425351027,
+   "mAP_track": 0.34787864890029846,
+   "IDF1": 0.48391249640764933,
+   "IDSW_per_gt_id": 3.6171839856050383,
+   "id_ratio": 9.193882141250562,
+   "IDF1_std": 0.013316986369478815,
+   "drop_mAP_det": 0.18002796917124775,
+   "drop_IDF1": 0.1555130934569524,
+   "amplificacao": 0.8638274051129462
+  },
+  {
+   "tracker": "GRU",
+   "level_1": "media",
+   "mAP_det": 0.23311109501355812,
+   "mAP_track": 0.23313260918728054,
+   "IDF1": 0.36456573371330175,
+   "IDSW_per_gt_id": 5.281826360773729,
+   "id_ratio": 21.260571300044983,
+   "IDF1_std": 0.028015202748055582,
+   "drop_mAP_det": 0.4505380664179357,
+   "drop_IDF1": 0.36378789351248497,
+   "amplificacao": 0.8074520681567047
+  },
+  {
+   "tracker": "GRU",
+   "level_1": "pesada",
+   "mAP_det": 0.0908799934873687,
+   "mAP_track": 0.09088286728946639,
+   "IDF1": 0.19834623002285298,
+   "IDSW_per_gt_id": 10.320625281151598,
+   "id_ratio": 35.32849752586595,
+   "IDF1_std": 0.012731725373399545,
+   "drop_mAP_det": 0.7857884158512889,
+   "drop_IDF1": 0.653861399612686,
+   "amplificacao": 0.8321087285364483
+  },
+  {
+   "tracker": "GRU min_hits=3",
+   "level_1": "limpo",
+   "mAP_det": 0.4242534027677862,
+   "mAP_track": 0.41561581444068324,
+   "IDF1": 0.5717792974594813,
+   "IDSW_per_gt_id": 2.448717948717949,
+   "id_ratio": 1.8397435897435899,
+   "IDF1_std": 0.0,
+   "drop_mAP_det": 0.0,
+   "drop_IDF1": 0.0,
+   "amplificacao": NaN
+  },
+  {
+   "tracker": "GRU min_hits=3",
+   "level_1": "leve",
+   "mAP_det": 0.34787592425351027,
+   "mAP_track": 0.35836732055585613,
+   "IDF1": 0.49362422160771624,
+   "IDSW_per_gt_id": 3.003373819163293,
+   "id_ratio": 2.170602789023842,
+   "IDF1_std": 0.014012690344229646,
+   "drop_mAP_det": 0.18002796917124775,
+   "drop_IDF1": 0.13668748798535058,
+   "amplificacao": 0.7592569566528272
+  },
+  {
+   "tracker": "GRU min_hits=3",
+   "level_1": "media",
+   "mAP_det": 0.23311109501355812,
+   "mAP_track": 0.2656899181683585,
+   "IDF1": 0.38762397557143674,
+   "IDSW_per_gt_id": 4.277103013945119,
+   "id_ratio": 3.6643049932523617,
+   "IDF1_std": 0.029186689954992812,
+   "drop_mAP_det": 0.4505380664179357,
+   "drop_IDF1": 0.3220741336845876,
+   "amplificacao": 0.7148655301099902
+  },
+  {
+   "tracker": "GRU min_hits=3",
+   "level_1": "pesada",
+   "mAP_det": 0.0908799934873687,
+   "mAP_track": 0.11678608062698437,
+   "IDF1": 0.22151545677582915,
+   "IDSW_per_gt_id": 8.375168690958164,
+   "id_ratio": 6.626968061178587,
+   "IDF1_std": 0.014521261967712713,
+   "drop_mAP_det": 0.7857884158512889,
+   "drop_IDF1": 0.612585734110937,
+   "amplificacao": 0.7795810192076811
+  },
+  {
+   "tracker": "baseline",
+   "level_1": "limpo",
+   "mAP_det": 0.4242534027677862,
+   "mAP_track": 0.42425539977862403,
+   "IDF1": 0.4922755008562931,
+   "IDSW_per_gt_id": 4.088731443994602,
+   "id_ratio": 2.2766531713900133,
+   "IDF1_std": 0.0,
+   "drop_mAP_det": 0.0,
+   "drop_IDF1": 0.0,
+   "amplificacao": NaN
+  },
+  {
+   "tracker": "baseline",
+   "level_1": "leve",
+   "mAP_det": 0.34787592425351027,
+   "mAP_track": 0.34787918439633964,
+   "IDF1": 0.4315671580903367,
+   "IDSW_per_gt_id": 4.8345704003598735,
+   "id_ratio": 9.48459289248763,
+   "IDF1_std": 0.0032999803181899294,
+   "drop_mAP_det": 0.18002796917124775,
+   "drop_IDF1": 0.12332188512399411,
+   "amplificacao": 0.6850151434341117
+  },
+  {
+   "tracker": "baseline",
+   "level_1": "media",
+   "mAP_det": 0.23311109501355812,
+   "mAP_track": 0.23312396557829343,
+   "IDF1": 0.3247585768673941,
+   "IDSW_per_gt_id": 6.508659469185784,
+   "id_ratio": 21.203553756185332,
+   "IDF1_std": 0.005761229778425803,
+   "drop_mAP_det": 0.4505380664179357,
+   "drop_IDF1": 0.34029100310194227,
+   "amplificacao": 0.7552991155830011
+  },
+  {
+   "tracker": "baseline",
+   "level_1": "pesada",
+   "mAP_det": 0.0908799934873687,
+   "mAP_track": 0.0908853328493298,
+   "IDF1": 0.1810487046842146,
+   "IDSW_per_gt_id": 10.950179937022043,
+   "id_ratio": 34.68679712100765,
+   "IDF1_std": 0.005794554585286629,
+   "drop_mAP_det": 0.7857884158512889,
+   "drop_IDF1": 0.6322207699361684,
+   "amplificacao": 0.8045687072788519
+  }
+ ]
+}

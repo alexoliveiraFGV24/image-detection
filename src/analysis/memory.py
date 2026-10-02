@@ -2,12 +2,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from src.dataset.trajectories import collate_trajectories
 from src.nn.boxes import ID, FRAME, X1, Y2, CONF, box_iou_matrix, cxcywh_to_xyxy
 from src.nn.loss import make_box_loss
 from src.nn.metrics import reacquisition_events, keep_rate_by_gap
 from src.nn.models import gradient_norm_through_time
-from src.nn.tracking import Tracker, RNNMotion, StaticMotion
+from src.nn.tracking import Tracker, StaticMotion, RNNMotion
 from src.nn.train import trajectory_dataset
 
 
@@ -20,7 +19,7 @@ TRACKER = {"matching": "hungarian", "iou_threshold": 0.3, "max_age": 20}
 def gradient_curve(model, seqs, length=48, n_windows=512, seed=0):
     ds = trajectory_dataset(seqs, length)
     gen = torch.Generator().manual_seed(seed)
-    batch = next(iter(DataLoader(ds, batch_size=n_windows, shuffle=True, generator=gen, collate_fn=collate_trajectories)))
+    batch = next(iter(DataLoader(ds, batch_size=n_windows, shuffle=True, generator=gen)))
 
     full = batch["valid"].all(dim=1)
     batch = {k: v[full] for k, v in batch.items()}
@@ -47,7 +46,7 @@ def _iou_rows(a, b):
 @torch.no_grad()
 def free_running_iou(model, seqs, warmup=8, horizon=40):
     ds = trajectory_dataset(seqs, warmup + horizon)
-    batch = collate_trajectories([ds[i] for i in range(len(ds))])
+    batch = next(iter(DataLoader(ds, batch_size=len(ds))))
     full = batch["valid"].all(dim=1)
     boxes = batch["boxes"][full]
 
@@ -58,7 +57,7 @@ def free_running_iou(model, seqs, warmup=8, horizon=40):
     else:
         observed = torch.ones(*boxes.shape[:2], 1)
         observed[:, warmup:] = 0.0
-        pred = model.eval()(boxes, observed=observed)["box"][:, warmup - 1:-1].numpy()
+        pred = model.eval()(boxes, observed)["box"][:, warmup - 1:-1].numpy()
 
     return np.array([_iou_rows(pred[:, k], target[:, k]).mean() for k in range(horizon)])
 
@@ -68,7 +67,7 @@ def free_running_iou(model, seqs, warmup=8, horizon=40):
 # ----------
 def run_tracker(seq, model=None, detector="SDP", min_score=0.9, detections=None, **tracker_kwargs):
     det = detections if detections is not None else seq.public_detections(detector, min_score=min_score)
-    motion = StaticMotion() if model is None else RNNMotion(model, seq.image_size)
+    motion = StaticMotion() if model is None else RNNMotion(model, seq.height, seq.fps)
 
     tracker = Tracker(motion, **{**TRACKER, **tracker_kwargs})
     pred = tracker.run(det, frames=range(seq.n_frames))
