@@ -69,7 +69,7 @@ trajetórias pode capturar essa regularidade, o filtro não. O teste
 `test_static_loses_moving_object_kalman_keeps_it` em `tests/tests.py` documenta o caso
 em que o Kalman *deve* ganhar.
 
-Decisões que continuam nossas: escolha da trilha da Parte 2 e do eixo da ablação.
+Decisões que continuam nossas: o eixo da ablação (Parte 3).
 
 ## Sessão 2 — Parte 1 (baseline por quadro no MOT17)
 
@@ -103,3 +103,45 @@ usou 300 propostas no teste, como no artigo original do Faster R-CNN: as mesmas 
 detecções no quadro mais denso do MOT17-04, ~30 % mais rápido. Também baixou o
 `MOT17Det.zip` (1,9 GB) em vez do `MOT17.zip` (5,9 GB): as mesmas imagens, sem a
 triplicação por detector.
+
+## Sessão 3 — Parte 2 (memória temporal)
+
+O que pedimos: resolver a Parte 2 em `reports/2_temporal_memory.ipynb`. A **escolha da
+Trilha A** (RNN como modelo de movimento) foi da IA, justificada pelo diagnóstico da Parte 1
+(as perdas dominantes eram de movimento: caixa que fica para trás com câmera móvel e
+oclusões mais longas que `max_age`) — revisada por nós.
+
+### Episódio 6 — a GRU prevê melhor e rastreia igual: reportar em vez de forçar
+
+A primeira GRU foi treinada com um ruído gaussiano simulado, com os desvios medidos no SDP.
+No nível da caixa ela ganhava do Kalman, mas no rastreador perdia para um Kalman bem
+ajustado — que o enunciado avisa ser "difícil de bater". A IA testou hipóteses uma a uma,
+cada uma com um experimento: mais capacidade (GRU de 128: nada), augmentation de
+espelhamento/reversão temporal/associações erradas (nada), a regra de associação ajustada
+para cada modelo (o Kalman continuou à frente). Depois mediu a autocorrelação do erro real
+do SDP entre quadros seguidos (~0,45) e propôs treinar com as **próprias detecções** casadas
+com o GT em vez de um ruído independente — a escolha de princípio, que entrou no notebook.
+Mesmo assim o IDF1 empatou no treino e perdeu na validação. A IA não ajustou nada olhando a
+validação para virar o resultado; explicou o empate (com limiar de IoU 0,3, prever 2 pontos
+melhor quase nunca muda um casamento) e mostrou onde a memória de fato ajuda. A pergunta em
+aberto — por que a GRU troca mais vizinhos que o Kalman — ficou registrada para a Parte 4.
+
+### Episódio 7 — o exemplo que dizia o contrário do texto
+
+Para a Parte 1 a IA escolheu por regra um exemplo de perda de identidade (MOT17-10, GT 6) e
+escreveu que "um modelo de movimento manteria o id". Na Parte 2, os três modelos perdiam o id
+exatamente ali. A IA investigou quadro a quadro: o detector não falhou — ele produzia uma
+caixa fundindo a pessoa e a vizinha (IoU 0,48 com o GT) e, quando separou as duas, a track
+seguiu a outra. O texto da Parte 1 foi corrigido ("transferência induzida pelo detector, não
+movimento") e a Parte 2 passou a escolher, também por regra, um caso que a GRU resolve, e a
+contar quantas perdas do baseline cada modelo resolve.
+
+### Episódio 8 — o kernel do VS Code, a suspensão e o cache corrompível
+
+Enquanto o detector do torchvision rodava em segundo plano, a máquina suspendeu por 9 h e,
+ao voltar, um kernel do VS Code passou a rodar o `1_baseline.ipynb` — e com ele o mesmo
+detector, sobre o mesmo cache. A IA não mexeu no kernel (era nosso). Mediu a CPU dele para
+confirmar, tirou os próprios processos do caminho e acrescentou a `src/nn/detector.py` uma
+trava (não retoma um parcial escrito há menos de 10 min por outro processo) e a medida de
+tempo pela mediana dos blocos, imune a suspensões. Também achou e corrigiu um vazamento de
+handle do `np.load` no Windows que impedia apagar o arquivo parcial.

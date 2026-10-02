@@ -1,0 +1,68 @@
+{
+  "descricao": "Pesos do modelo temporal do PA2 (Parte 2, Trilha A: RNN como modelo de movimento).",
+  "modelo_final": {
+    "arquivo": "reports/results/2_motion_gru.pt",
+    "tamanho_bytes": 61265,
+    "classe": "src.nn.models.MotionModel",
+    "config": {
+      "cell": "gru",
+      "hidden_size": 64,
+      "num_layers": 1,
+      "bidirectional": false,
+      "predict_uncertainty": false,
+      "use_dt": true
+    },
+    "parametros": 14084,
+    "treino": {
+      "cell": "gru",
+      "hidden_size": 64,
+      "epochs": 12,
+      "lr": 0.003,
+      "batch_size": 64,
+      "window": 32,
+      "sampling_max": 0.5,
+      "clip_grad": 1.0,
+      "loss": "smooth_l1",
+      "beta": 0.1,
+      "seed": 42
+    },
+    "entradas_de_treino": "DetectorReplay (SDP >= 0.9)",
+    "regra_de_associacao": {
+      "matching": "hungarian",
+      "iou_threshold": 0.3,
+      "max_age": 40
+    },
+    "fonte_de_deteccoes": {
+      "detector": "SDP (publico do MOT17)",
+      "min_score": 0.9
+    }
+  },
+  "variante_com_incerteza": {
+    "arquivo": "reports/results/2_motion_gru_nll.pt",
+    "config": {
+      "cell": "gru",
+      "hidden_size": 64,
+      "num_layers": 1,
+      "bidirectional": false,
+      "predict_uncertainty": true,
+      "use_dt": true
+    },
+    "perda": "NLL gaussiana",
+    "regra_de_associacao": {
+      "matching": "hungarian",
+      "iou_threshold": 0.3,
+      "max_age": 20,
+      "gate": 9.49
+    }
+  },
+  "como_carregar": [
+    "from src.nn.models import load_motion_model",
+    "model, checkpoint = load_motion_model('reports/results/2_motion_gru.pt')"
+  ],
+  "como_rastrear": [
+    "from src.nn.tracking import track_sequence, RNNMotion",
+    "tracks = track_sequence(detections, n_frames, motion=RNNMotion(model, image_height, fps),",
+    "                        matching='hungarian', iou_threshold=0.3, max_age=40)"
+  ],
+  "gerado_por": "reports/2_temporal_memory.ipynb (se o .pt existe, o notebook so carrega; apague-o para treinar de novo)"
+}

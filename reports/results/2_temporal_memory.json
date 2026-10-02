@@ -1,0 +1,318 @@
+{
+  "track": "A (RNN como modelo de movimento)",
+  "detections": {
+    "detector": "SDP",
+    "min_score": 0.9
+  },
+  "detector_error": {
+    "dx / w": {
+      "desvio do erro (robusto)": 0.0594,
+      "autocorrelação entre quadros seguidos": 0.388,
+      "desvio do salto quadro a quadro (medido)": 0.0724,
+      "salto se o erro fosse independente (σ·√2)": 0.0961
+    },
+    "dy / h": {
+      "desvio do erro (robusto)": 0.0219,
+      "autocorrelação entre quadros seguidos": 0.4241,
+      "desvio do salto quadro a quadro (medido)": 0.028,
+      "salto se o erro fosse independente (σ·√2)": 0.0392
+    },
+    "dlog w": {
+      "desvio do erro (robusto)": 0.0784,
+      "autocorrelação entre quadros seguidos": 0.5265,
+      "desvio do salto quadro a quadro (medido)": 0.0855,
+      "salto se o erro fosse independente (σ·√2)": 0.1277
+    },
+    "dlog h": {
+      "desvio do erro (robusto)": 0.0413,
+      "autocorrelação entre quadros seguidos": 0.4387,
+      "desvio do salto quadro a quadro (medido)": 0.0509,
+      "salto se o erro fosse independente (σ·√2)": 0.0713
+    }
+  },
+  "training_inputs": "DetectorReplay: deteccoes reais do SDP >= 0.9 + blocos de ausencia (p = 0.3, 1-40 quadros)",
+  "train_cfg": {
+    "cell": "gru",
+    "hidden_size": 64,
+    "epochs": 12,
+    "lr": 0.003,
+    "batch_size": 64,
+    "window": 32,
+    "sampling_max": 0.5,
+    "clip_grad": 1.0,
+    "loss": "smooth_l1",
+    "beta": 0.1,
+    "seed": 42
+  },
+  "kalman": {
+    "process_noise": 16.0,
+    "measurement_noise": 0.5
+  },
+  "association": {
+    "última caixa (Parte 1)": {
+      "matching": "hungarian",
+      "iou_threshold": 0.3,
+      "max_age": 20
+    },
+    "GRU (Trilha A)": {
+      "matching": "hungarian",
+      "iou_threshold": 0.3,
+      "max_age": 40
+    },
+    "Kalman vel. constante": {
+      "matching": "hungarian",
+      "iou_threshold": 0.3,
+      "max_age": 40
+    },
+    "GRU-NLL + portão adaptativo": {
+      "matching": "hungarian",
+      "iou_threshold": 0.3,
+      "max_age": 20,
+      "gate": 9.49
+    },
+    "GRU-NLL, só IoU": {
+      "matching": "hungarian",
+      "iou_threshold": 0.2,
+      "max_age": 20,
+      "gate": null
+    }
+  },
+  "checkpoints": {
+    "GRU (Trilha A)": "results\\2_motion_gru.pt",
+    "GRU-NLL": "results\\2_motion_gru_nll.pt"
+  },
+  "prediction_iou_by_k": {
+    "última caixa observada (Parte 1)": {
+      "k=0": 0.786300003528595,
+      "k=1": 0.6596999764442444,
+      "k=2-3": 0.5715000033378601,
+      "k=4-7": 0.43970000743865967,
+      "k=8-15": 0.28119999170303345,
+      "k=16-31": 0.1518000066280365,
+      "k=32-63": 0.06840000301599503,
+      "% IoU>=0,3 em coasting": 51.3561
+    },
+    "velocidade constante": {
+      "k=0": 0.7418000102043152,
+      "k=1": 0.6093000173568726,
+      "k=2-3": 0.5248000025749207,
+      "k=4-7": 0.396699994802475,
+      "k=8-15": 0.23190000653266907,
+      "k=16-31": 0.11919999867677689,
+      "k=32-63": 0.05790000036358833,
+      "% IoU>=0,3 em coasting": 46.278
+    },
+    "Kalman vel. constante": {
+      "k=0": 0.7908999919891357,
+      "k=1": 0.671500027179718,
+      "k=2-3": 0.5946999788284302,
+      "k=4-7": 0.4925999939441681,
+      "k=8-15": 0.34459999203681946,
+      "k=16-31": 0.19679999351501465,
+      "k=32-63": 0.07970000058412552,
+      "% IoU>=0,3 em coasting": 56.7976
+    },
+    "GRU (Trilha A)": {
+      "k=0": 0.8080000281333923,
+      "k=1": 0.6868000030517578,
+      "k=2-3": 0.6128000020980835,
+      "k=4-7": 0.5095000267028809,
+      "k=8-15": 0.36410000920295715,
+      "k=16-31": 0.2003999948501587,
+      "k=32-63": 0.07150000333786011,
+      "% IoU>=0,3 em coasting": 56.8652
+    }
+  },
+  "combined": {
+    "treino": {
+      "última caixa (Parte 1)": {
+        "IDF1": 0.6116,
+        "IDSW": 1045.0,
+        "FRAG": 2308.0,
+        "IDSW_per_gt_id": 2.257,
+        "id_ratio": 1.8985,
+        "MOTA": 0.6105
+      },
+      "Kalman vel. constante": {
+        "IDF1": 0.6574,
+        "IDSW": 754.0,
+        "FRAG": 2289.0,
+        "IDSW_per_gt_id": 1.6285,
+        "id_ratio": 1.5464,
+        "MOTA": 0.6136
+      },
+      "GRU (Trilha A)": {
+        "IDF1": 0.6548,
+        "IDSW": 855.0,
+        "FRAG": 2330.0,
+        "IDSW_per_gt_id": 1.8467,
+        "id_ratio": 1.486,
+        "MOTA": 0.6126
+      },
+      "GRU-NLL, só IoU": {
+        "IDF1": 0.6381,
+        "IDSW": 726.0,
+        "FRAG": 2274.0,
+        "IDSW_per_gt_id": 1.568,
+        "id_ratio": 1.4449,
+        "MOTA": 0.6138
+      },
+      "GRU-NLL + portão adaptativo": {
+        "IDF1": 0.6407,
+        "IDSW": 715.0,
+        "FRAG": 2270.0,
+        "IDSW_per_gt_id": 1.5443,
+        "id_ratio": 1.2829,
+        "MOTA": 0.614
+      }
+    },
+    "val": {
+      "última caixa (Parte 1)": {
+        "IDF1": 0.5065,
+        "IDSW": 393.0,
+        "FRAG": 587.0,
+        "IDSW_per_gt_id": 4.7349,
+        "id_ratio": 2.6506,
+        "MOTA": 0.6412
+      },
+      "Kalman vel. constante": {
+        "IDF1": 0.5572,
+        "IDSW": 294.0,
+        "FRAG": 602.0,
+        "IDSW_per_gt_id": 3.5422,
+        "id_ratio": 2.3735,
+        "MOTA": 0.6466
+      },
+      "GRU (Trilha A)": {
+        "IDF1": 0.5186,
+        "IDSW": 325.0,
+        "FRAG": 600.0,
+        "IDSW_per_gt_id": 3.9157,
+        "id_ratio": 2.3373,
+        "MOTA": 0.6448
+      },
+      "GRU-NLL, só IoU": {
+        "IDF1": 0.5335,
+        "IDSW": 259.0,
+        "FRAG": 591.0,
+        "IDSW_per_gt_id": 3.1205,
+        "id_ratio": 2.012,
+        "MOTA": 0.6484
+      },
+      "GRU-NLL + portão adaptativo": {
+        "IDF1": 0.5607,
+        "IDSW": 275.0,
+        "FRAG": 592.0,
+        "IDSW_per_gt_id": 3.3133,
+        "id_ratio": 1.9759,
+        "MOTA": 0.6476
+      }
+    },
+    "todas": {
+      "última caixa (Parte 1)": {
+        "IDF1": 0.5941,
+        "IDSW": 1438.0,
+        "FRAG": 2895.0,
+        "IDSW_per_gt_id": 2.6337,
+        "id_ratio": 2.0128,
+        "MOTA": 0.6155
+      },
+      "Kalman vel. constante": {
+        "IDF1": 0.6407,
+        "IDSW": 1048.0,
+        "FRAG": 2891.0,
+        "IDSW_per_gt_id": 1.9194,
+        "id_ratio": 1.6722,
+        "MOTA": 0.6189
+      },
+      "GRU (Trilha A)": {
+        "IDF1": 0.6322,
+        "IDSW": 1180.0,
+        "FRAG": 2930.0,
+        "IDSW_per_gt_id": 2.1612,
+        "id_ratio": 1.6154,
+        "MOTA": 0.6178
+      },
+      "GRU-NLL, só IoU": {
+        "IDF1": 0.6207,
+        "IDSW": 985.0,
+        "FRAG": 2865.0,
+        "IDSW_per_gt_id": 1.804,
+        "id_ratio": 1.5311,
+        "MOTA": 0.6194
+      },
+      "GRU-NLL + portão adaptativo": {
+        "IDF1": 0.6275,
+        "IDSW": 990.0,
+        "FRAG": 2862.0,
+        "IDSW_per_gt_id": 1.8132,
+        "id_ratio": 1.3883,
+        "MOTA": 0.6194
+      }
+    }
+  },
+  "per_sequence_IDF1": {
+    "GRU (Trilha A)": {
+      "MOT17-02": 0.4364,
+      "MOT17-04": 0.7484,
+      "MOT17-05": 0.6247,
+      "MOT17-09": 0.5136,
+      "MOT17-10": 0.5205,
+      "MOT17-11": 0.6413,
+      "MOT17-13": 0.5932
+    },
+    "GRU-NLL + portão adaptativo": {
+      "MOT17-02": 0.4337,
+      "MOT17-04": 0.7269,
+      "MOT17-05": 0.6114,
+      "MOT17-09": 0.6064,
+      "MOT17-10": 0.5427,
+      "MOT17-11": 0.6335,
+      "MOT17-13": 0.5893
+    },
+    "GRU-NLL, só IoU": {
+      "MOT17-02": 0.419,
+      "MOT17-04": 0.7243,
+      "MOT17-05": 0.5934,
+      "MOT17-09": 0.533,
+      "MOT17-10": 0.5338,
+      "MOT17-11": 0.6479,
+      "MOT17-13": 0.5987
+    },
+    "Kalman vel. constante": {
+      "MOT17-02": 0.4689,
+      "MOT17-04": 0.7374,
+      "MOT17-05": 0.6547,
+      "MOT17-09": 0.6045,
+      "MOT17-10": 0.5385,
+      "MOT17-11": 0.653,
+      "MOT17-13": 0.5858
+    },
+    "última caixa (Parte 1)": {
+      "MOT17-02": 0.4264,
+      "MOT17-04": 0.6909,
+      "MOT17-05": 0.6162,
+      "MOT17-09": 0.5192,
+      "MOT17-10": 0.5015,
+      "MOT17-11": 0.6399,
+      "MOT17-13": 0.5046
+    }
+  },
+  "loss_causes": {
+    "GRU (Trilha A)": {
+      "morta e renascida (g > max_age)": 94,
+      "perdida no coasting (1 <= g <= max_age)": 478,
+      "troca entre vizinhos (g = 0)": 608
+    },
+    "Kalman vel. constante": {
+      "morta e renascida (g > max_age)": 101,
+      "perdida no coasting (1 <= g <= max_age)": 525,
+      "troca entre vizinhos (g = 0)": 422
+    },
+    "última caixa (Parte 1)": {
+      "morta e renascida (g > max_age)": 206,
+      "perdida no coasting (1 <= g <= max_age)": 485,
+      "troca entre vizinhos (g = 0)": 747
+    }
+  }
+}

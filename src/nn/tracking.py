@@ -19,7 +19,9 @@ numeros diferentes):
     1. a cada quadro, IoU entre a caixa PREVISTA de cada track viva e
        cada deteccao do quadro (deteccoes com score < min_score saem);
     2. matching guloso por IoU decrescente (ou Hungarian), limiar fixo
-       `iou_threshold`;
+       `iou_threshold` -- ou, com `gate`, o portao adaptativo: tambem
+       entram pares com IoU abaixo do limiar se a deteccao cair dentro
+       da elipse de incerteza prevista pela rede (Trilha A, opcional);
     3. deteccao sem par -> track NOVA (id novo, nunca reutilizado);
     4. track sem par -> "coasting": o estado roda para frente sem
        observacao e a idade cresce; com idade > `max_age` a track morre.
@@ -45,8 +47,8 @@ from src.nn.metrics import MATCHERS
 
 class MotionModelBase:
     """
-    Interface minima que o Tracker exige. O `state` e opaco para o
-    rastreador; so o modelo de movimento sabe o que ele contem.
+    Interface que o Tracker exige. O `state` e opaco para o rastreador;
+    so o modelo de movimento sabe o que ele contem.
 
         init(box, score, t)      -> state       (nascimento da track)
         predict(state)           -> box (4,)    (caixa esperada no quadro atual)
@@ -56,6 +58,11 @@ class MotionModelBase:
     `predict` e um getter: `update`/`coast` ja deixam pronta a previsao
     para o proximo quadro. Isso vale para os tres modelos -- na RNN, o
     passo da celula acontece em update/coast, e a previsao e a saida.
+
+    O Tracker chama as versoes EM LOTE (`*_many`, todas as tracks do
+    quadro de uma vez). Aqui elas so repetem a versao unitaria; a RNN as
+    sobrescreve para rodar um passo da celula para todas as tracks numa
+    unica chamada.
     """
 
     def init(self, box, score, t):
@@ -69,6 +76,24 @@ class MotionModelBase:
 
     def coast(self, state, t):
         raise NotImplementedError
+
+    # --- versoes em lote
+
+    def init_many(self, boxes, scores, t):
+        return [self.init(b, s, t) for b, s in zip(boxes, scores)]
+
+    def predict_many(self, states):
+        return np.asarray([self.predict(s) for s in states], dtype=np.float64).reshape(-1, 4)
+
+    def update_many(self, states, boxes, scores, t):
+        return [self.update(st, b, s, t) for st, b, s in zip(states, boxes, scores)]
+
+    def coast_many(self, states, t):
+        return [self.coast(st, t) for st in states]
+
+    def gate_distance_many(self, states, boxes):
+        """Distancia de Mahalanobis (tracks x deteccoes) para o portao adaptativo."""
+        raise NotImplementedError(f"{type(self).__name__} nao preve incerteza")
 
 
 class StaticMotion(MotionModelBase):
@@ -98,6 +123,8 @@ class KalmanMotion(MotionModelBase):
         process_noise: desvio do ruido de processo (posicao e tamanho);
             a velocidade usa process_noise / 10.
         measurement_noise: desvio do ruido de medida (pixels).
+        velocity_decay: fator aplicado a velocidade a cada passo (1 =
+            velocidade constante).
     """
 
     def __init__(self, process_noise=1.0, measurement_noise=1.0, velocity_decay=1.0):
@@ -158,87 +185,158 @@ class KalmanMotion(MotionModelBase):
 class RNNMotion(MotionModelBase):
     """
     Adaptador para o MotionModel recorrente (src/nn/models.py) da
-    Parte 2 -- Trilha A. Um estado recorrente POR TRACK.
+    Parte 2 -- Trilha A. Um estado recorrente POR TRACK, mas um unico
+    passo da celula por quadro para todas as tracks (lote).
 
-    A cada quadro a celula recebe a ultima observacao (caixa, confianca,
-    dt, flag de observado) e preve a caixa do quadro seguinte. Sob
-    oclusao (`coast`) a entrada e a propria previsao anterior, com a
-    flag de observado em zero: o estado roda para frente sem observacao.
+    A cada quadro a celula recebe a ultima observacao (a caixa da
+    deteccao associada, com a flag de observado = 1) e preve a caixa do
+    quadro seguinte. Sob oclusao (`coast`) a entrada e a propria previsao
+    anterior, com a flag em zero: o estado roda para frente sem
+    observacao, e a track sobrevive enquanto a previsao continuar
+    encontrando a pessoa (ou ate `max_age`).
+
+    Caixas dentro do modelo: (cx, cy, w, h) divididas pela ALTURA da
+    imagem (mesma escala nos dois eixos). dt: quadros entre dois passos,
+    em unidades de 1/30 s (dt = 30 / fps a cada quadro).
 
     Args:
         model: MotionModel treinado.
-        image_size: (largura, altura) para normalizar as caixas.
+        image_height: altura da imagem da sequencia (px).
+        fps: taxa de quadros da sequencia.
         device: torch device.
     """
 
-    def __init__(self, model, image_size, device="cpu"):
+    def __init__(self, model, image_height, fps=30.0, device="cpu"):
 
         import torch
 
         self.torch = torch
         self.model = model.to(device).eval()
         self.device = device
-        self.image_size = np.asarray(image_size, dtype=np.float64)
+        self.scale = float(image_height)
+        self.dt_unit = 30.0 / float(fps)
 
-    def _normalize(self, box):
-        cxcywh = xyxy_to_cxcywh(np.asarray(box, dtype=np.float64))
-        scale = np.concatenate([self.image_size, self.image_size])
-        return cxcywh / scale
+    # --- conversoes
 
-    def _denormalize(self, cxcywh):
-        scale = np.concatenate([self.image_size, self.image_size])
-        return cxcywh_to_xyxy(np.asarray(cxcywh, dtype=np.float64) * scale)
+    def _to_model(self, boxes_xyxy):
+        return xyxy_to_cxcywh(np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4)) / self.scale
 
-    def _step(self, state, box_n, score, dt, observed):
+    def _to_pixels(self, cxcywh):
+        return cxcywh_to_xyxy(np.asarray(cxcywh, dtype=np.float64).reshape(-1, 4) * self.scale)
+
+    def _tensor(self, array):
+        return self.torch.as_tensor(np.asarray(array), dtype=self.torch.float32, device=self.device)
+
+    # --- um passo da celula para varias tracks
+
+    def _run(self, states, box_in, observed, t):
+
+        from src.nn.models import stack_states, unstack_state
+
+        if len(states) == 0:
+            return states
 
         torch = self.torch
 
+        prev_in = np.stack([s["last_input"] for s in states])
+        dt = np.array([(t - s["t_step"]) * self.dt_unit for s in states])
+
         with torch.no_grad():
-
-            box_t = torch.as_tensor(box_n, dtype=torch.float32, device=self.device)[None]
-            prev_t = torch.as_tensor(state["last_input"], dtype=torch.float32, device=self.device)[None]
-
             out = self.model.step(
-                box=box_t,
-                prev_box=prev_t,
-                conf=torch.full((1, 1), float(score), device=self.device),
-                dt=torch.full((1, 1), float(dt), device=self.device),
-                observed=torch.full((1, 1), float(observed), device=self.device),
-                state=state["h"],
+                box_in=self._tensor(box_in),
+                prev_in=self._tensor(prev_in),
+                observed=self._tensor(np.asarray(observed, dtype=np.float64).reshape(-1, 1)),
+                state=stack_states([s["h"] for s in states]),
+                dt=self._tensor(dt.reshape(-1, 1)),
             )
 
-        state["h"] = out["state"]
-        state["last_input"] = box_n
-        state["pred_n"] = out["box"][0].cpu().numpy()
-        state["log_var"] = out["log_var"][0].cpu().numpy() if out.get("log_var") is not None else None
-        return state
+        pred = out["box"].cpu().numpy().astype(np.float64)
+        log_var = out["log_var"].cpu().numpy().astype(np.float64) if out["log_var"] is not None else None
+
+        for i, s in enumerate(states):
+            s["h"] = unstack_state(out["state"], i)
+            s["last_input"] = np.asarray(box_in[i], dtype=np.float64)
+            s["pred"] = pred[i]
+            s["log_var"] = log_var[i] if log_var is not None else None
+            s["t_step"] = t
+
+        return states
+
+    def init_many(self, boxes, scores, t):
+
+        boxes_n = self._to_model(boxes)
+
+        states = [{
+            "h": self.model.init_state(1, self.device),
+            "last_input": b,                # sem passado: velocidade de entrada zero
+            "t_step": t - 1,                # primeiro passo com dt nominal
+        } for b in boxes_n]
+
+        return self._run(states, boxes_n, np.ones(len(states)), t)
+
+    def predict_many(self, states):
+
+        if len(states) == 0:
+            return np.zeros((0, 4))
+
+        return self._to_pixels(np.stack([s["pred"] for s in states]))
+
+    def update_many(self, states, boxes, scores, t):
+        return self._run(states, self._to_model(boxes), np.ones(len(states)), t)
+
+    def coast_many(self, states, t):
+
+        if len(states) == 0:
+            return states
+
+        # free-running: a entrada e a propria previsao, sem observacao
+        own = np.stack([s["pred"] for s in states])
+        return self._run(states, own, np.zeros(len(states)), t)
+
+    def gate_distance_many(self, states, boxes):
+        """
+        Distancia de Mahalanobis entre cada deteccao e a previsao de cada
+        track, no espaco dos deltas (src/nn/models.py::encode_delta), com
+        a variancia que a rede preve. Sob oclusao longa a rede "abre" a
+        variancia e o portao cresce junto -- o portao adaptativo.
+        """
+
+        from src.nn.models import encode_delta
+
+        if self.model.predict_uncertainty is False:
+            raise NotImplementedError("o MotionModel foi treinado sem a cabeca de incerteza")
+
+        torch = self.torch
+        n_tracks, n_dets = len(states), len(boxes)
+
+        if n_tracks == 0 or n_dets == 0:
+            return np.zeros((n_tracks, n_dets))
+
+        ref = self._tensor(np.stack([s["last_input"] for s in states]))           # (N, 4)
+        pred = self._tensor(np.stack([s["pred"] for s in states]))                # (N, 4)
+        log_var = self._tensor(np.stack([s["log_var"] for s in states]))          # (N, 4)
+        dets = self._tensor(self._to_model(boxes))                                 # (M, 4)
+
+        with torch.no_grad():
+            delta_pred = encode_delta(pred, ref)                                   # (N, 4)
+            delta_obs = encode_delta(dets[None, :, :], ref[:, None, :])            # (N, M, 4)
+            d2 = ((delta_obs - delta_pred[:, None, :]) ** 2 * torch.exp(-log_var)[:, None, :]).sum(-1)
+
+        return d2.cpu().numpy().astype(np.float64)
+
+    # --- versoes unitarias (por completude)
 
     def init(self, box, score, t):
-
-        box_n = self._normalize(box)
-
-        state = {
-            "h": self.model.init_state(1, self.device),
-            "last_input": box_n,
-            "t_last": t,
-        }
-
-        return self._step(state, box_n, score, dt=1.0, observed=1.0)
+        return self.init_many([box], [score], t)[0]
 
     def predict(self, state):
-        return self._denormalize(state["pred_n"])
+        return self.predict_many([state])[0]
 
     def update(self, state, box, score, t):
-
-        dt = float(t - state["t_last"])
-        state["t_last"] = t
-
-        return self._step(state, self._normalize(box), score, dt=dt, observed=1.0)
+        return self.update_many([state], [box], [score], t)[0]
 
     def coast(self, state, t):
-
-        # Alimenta a propria previsao (free-running), sem observacao
-        return self._step(state, state["pred_n"], score=0.0, dt=1.0, observed=0.0)
+        return self.coast_many([state], t)[0]
 
 
 # ============================================================
@@ -274,10 +372,13 @@ class Tracker:
             o DPM do MOT17 tem scores negativos).
         min_hits: uma track so aparece na saida depois de `min_hits`
             observacoes (1 = aparece ja no nascimento).
+        gate: None (so IoU) ou o limiar da distancia de Mahalanobis do
+            portao adaptativo (ex.: 9.49 = qui-quadrado com 4 graus de
+            liberdade a 95 %). Exige um modelo de movimento com incerteza.
     """
 
     def __init__(self, motion=None, iou_threshold=0.3, max_age=5, matching="greedy",
-                 min_score=None, min_hits=1):
+                 min_score=None, min_hits=1, gate=None):
 
         self.motion = motion if motion is not None else StaticMotion()
         self.iou_threshold = iou_threshold
@@ -285,6 +386,7 @@ class Tracker:
         self.matching = matching
         self.min_score = min_score
         self.min_hits = min_hits
+        self.gate = gate
 
         self.reset()
 
@@ -292,9 +394,28 @@ class Tracker:
         self.tracks = []
         self.next_id = 1
         self.history = []       # linhas (frame, id, x1, y1, x2, y2, score)
-        self.predictions = []   # (frame, id, caixa prevista) -- para figuras
+        self.predictions = []   # (frame, id, caixa prevista, idade) -- para figuras
 
     # --------------------------------------------------------
+
+    def _association_scores(self, predicted, boxes):
+        """
+        Matriz de "afinidade" (tracks x deteccoes) e o limiar para o
+        matcher. Sem portao: o proprio IoU e o limiar fixo. Com portao: o
+        IoU onde o par e admissivel -- IoU >= limiar OU deteccao dentro
+        da elipse de incerteza da track -- e zero fora; pares admitidos so
+        pelo portao recebem pelo menos 1e-3, para o matcher considera-los.
+        """
+
+        iou = box_iou_matrix(predicted, boxes)
+
+        if self.gate is None or iou.size == 0:
+            return iou, self.iou_threshold
+
+        d2 = self.motion.gate_distance_many([tr.state for tr in self.tracks], boxes)
+        allowed = (iou >= self.iou_threshold) | (d2 <= self.gate)
+
+        return np.where(allowed, np.maximum(iou, 1e-3), 0.0), 1e-3
 
     def update(self, t, boxes, scores=None):
         """
@@ -316,39 +437,38 @@ class Tracker:
         boxes, scores = boxes[keep], scores[keep]
 
         # 1. caixas previstas das tracks vivas
-        predicted = np.array(
-            [self.motion.predict(tr.state) for tr in self.tracks],
-            dtype=np.float64,
-        ).reshape(-1, 4)
+        predicted = self.motion.predict_many([tr.state for tr in self.tracks])
 
         for tr, box in zip(self.tracks, predicted):
-            self.predictions.append((t, tr.id, box.copy()))
+            self.predictions.append((t, tr.id, box.copy(), tr.age))
 
         # 2. associacao
-        iou = box_iou_matrix(predicted, boxes)
-        pairs = MATCHERS[self.matching](iou, self.iou_threshold)
+        affinity, threshold = self._association_scores(predicted, boxes)
+        pairs = MATCHERS[self.matching](affinity, threshold)
 
-        matched_tracks = set()
-        matched_dets = set()
+        matched_tracks = {i for i, _ in pairs}
+        matched_dets = {j for _, j in pairs}
 
         rows = []
 
-        for i, j in pairs:
+        if pairs:
+            ti = [i for i, _ in pairs]
+            dj = [j for _, j in pairs]
+            new_states = self.motion.update_many([self.tracks[i].state for i in ti], boxes[dj], scores[dj], t)
 
-            tr = self.tracks[i]
-            tr.state = self.motion.update(tr.state, boxes[j], scores[j], t)
-            tr.age = 0
-            tr.hits += 1
-            tr.last_box = boxes[j]
-            tr.last_score = scores[j]
+            for i, j, state in zip(ti, dj, new_states):
+                tr = self.tracks[i]
+                tr.state = state
+                tr.age = 0
+                tr.hits += 1
+                tr.last_box = boxes[j]
+                tr.last_score = scores[j]
 
-            matched_tracks.add(i)
-            matched_dets.add(j)
-
-            if tr.hits >= self.min_hits:
-                rows.append((t, tr.id, *boxes[j], scores[j]))
+                if tr.hits >= self.min_hits:
+                    rows.append((t, tr.id, *boxes[j], scores[j]))
 
         # 3. tracks sem par: coasting / morte
+        coasting = []
         survivors = []
 
         for i, tr in enumerate(self.tracks):
@@ -360,24 +480,28 @@ class Tracker:
             tr.age += 1
 
             if tr.age <= self.max_age:
-                tr.state = self.motion.coast(tr.state, t)
+                coasting.append(tr)
                 survivors.append(tr)
+
+        if coasting:
+            for tr, state in zip(coasting, self.motion.coast_many([tr.state for tr in coasting], t)):
+                tr.state = state
 
         self.tracks = survivors
 
         # 4. deteccoes sem par: nascimento
-        for j in range(len(boxes)):
+        new_dets = [j for j in range(len(boxes)) if j not in matched_dets]
 
-            if j in matched_dets:
-                continue
+        if new_dets:
+            states = self.motion.init_many(boxes[new_dets], scores[new_dets], t)
 
-            state = self.motion.init(boxes[j], scores[j], t)
-            tr = Track(self.next_id, state, t, boxes[j], scores[j])
-            self.next_id += 1
-            self.tracks.append(tr)
+            for j, state in zip(new_dets, states):
+                tr = Track(self.next_id, state, t, boxes[j], scores[j])
+                self.next_id += 1
+                self.tracks.append(tr)
 
-            if tr.hits >= self.min_hits:
-                rows.append((t, tr.id, *boxes[j], scores[j]))
+                if tr.hits >= self.min_hits:
+                    rows.append((t, tr.id, *boxes[j], scores[j]))
 
         self.history.extend(rows)
 
@@ -430,8 +554,10 @@ class Tracker:
     def predicted_boxes_table(self):
         """
         Tabela (K, 7) com a caixa PREVISTA pelo modelo de movimento para
-        cada track viva em cada quadro (conf = 1). Serve para as figuras
-        da Parte 4 (caixa prevista pela recorrencia vs. observada).
+        cada track viva em cada quadro; a coluna `conf` guarda a IDADE da
+        track naquele quadro (0 = observada no quadro anterior, k = k
+        quadros de coasting). Serve para as figuras da caixa prevista pela
+        recorrencia vs. a observada.
         """
 
         if not self.predictions:
@@ -440,11 +566,12 @@ class Tracker:
         frames = [p[0] for p in self.predictions]
         ids = [p[1] for p in self.predictions]
         boxes = [p[2] for p in self.predictions]
+        ages = [p[3] for p in self.predictions]
 
-        return make_table(frames, ids, boxes, np.ones(len(frames)))
+        return make_table(frames, ids, boxes, ages)
 
 
-def track_sequence(detections, n_frames, motion=None, **tracker_kwargs):
+def track_sequence(detections, n_frames, motion=None, return_tracker=False, **tracker_kwargs):
     """
     Atalho: roda um Tracker novo em TODOS os quadros 0..n_frames-1 (os
     quadros sem nenhuma deteccao tambem contam: as tracks envelhecem).
@@ -453,11 +580,14 @@ def track_sequence(detections, n_frames, motion=None, **tracker_kwargs):
         detections: tabela (N, 7) de deteccoes.
         n_frames: numero de quadros da sequencia.
         motion: modelo de movimento (padrao: StaticMotion, a Parte 1).
-        **tracker_kwargs: iou_threshold, max_age, matching, ...
+        return_tracker: devolve tambem o Tracker (para as previsoes).
+        **tracker_kwargs: iou_threshold, max_age, matching, gate, ...
 
     Returns:
-        tabela (M, 7) de trajetorias previstas.
+        tabela (M, 7) de trajetorias previstas (e o Tracker, se pedido).
     """
 
     tracker = Tracker(motion if motion is not None else StaticMotion(), **tracker_kwargs)
-    return tracker.run(detections, frames=range(n_frames))
+    result = tracker.run(detections, frames=range(n_frames))
+
+    return (result, tracker) if return_tracker else result

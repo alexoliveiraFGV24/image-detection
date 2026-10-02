@@ -113,14 +113,25 @@ def cache_path(seq_name, arch=DEFAULT_ARCH, cache_dir="../data/detections"):
     return os.path.join(cache_dir, arch, f"{seq_name}.npy")
 
 
+class SequenceBusy(RuntimeError):
+    """Outro processo esta escrevendo o cache desta sequencia."""
+
+
 def run_on_sequence(seq, model=None, arch=DEFAULT_ARCH, device="cpu", cache_dir="../data/detections",
-                    chunk=25, verbose=True):
+                    chunk=25, verbose=True, busy_minutes=10):
     """
     Deteccoes cruas (pre-NMS) de uma sequencia inteira, com cache.
 
     Se o cache existe, so carrega. Senao roda o detector quadro a quadro
     e grava um arquivo parcial a cada `chunk` quadros -- se o processo
     cair, a proxima chamada continua de onde parou.
+
+    Se o arquivo parcial foi escrito ha menos de `busy_minutes` minutos,
+    outro processo esta rodando esta sequencia: levanta SequenceBusy em
+    vez de escrever junto (dois escritores corromperiam o cache).
+
+    O tempo por quadro e a MEDIANA dos blocos -- imune a uma suspensao
+    da maquina no meio do processamento.
 
     Returns:
         tabela (N, 7) = (frame, -1, x1, y1, x2, y2, score), sem NMS.
@@ -136,13 +147,20 @@ def run_on_sequence(seq, model=None, arch=DEFAULT_ARCH, device="cpu", cache_dir=
 
     rows = []
     start = 0
-    elapsed = 0.0
+    chunk_seconds = []
 
     if os.path.exists(partial):
-        data = np.load(partial)
-        rows = [data["rows"]]
-        start = int(data["next_frame"])
-        elapsed = float(data["elapsed"])
+
+        age_minutes = (time.time() - os.path.getmtime(partial)) / 60
+
+        if age_minutes < busy_minutes:
+            raise SequenceBusy(f"{partial} foi escrito ha {age_minutes:.1f} min por outro processo")
+
+        # `with`: no Windows o NpzFile segura o arquivo aberto e impede o os.remove no fim
+        with np.load(partial) as data:
+            rows = [np.array(data["rows"])]
+            start = int(data["next_frame"])
+            chunk_seconds = list(data["chunk_seconds"]) if "chunk_seconds" in data.files else []
 
     if model is None:
         model = load_detector(arch, device)
@@ -153,23 +171,25 @@ def run_on_sequence(seq, model=None, arch=DEFAULT_ARCH, device="cpu", cache_dir=
 
         tic = time.time()
         outputs = detect_images(model, [seq.image_path(t) for t in frames], device)
-        elapsed += time.time() - tic
+        chunk_seconds.append((time.time() - tic) / len(frames))
 
         for t, out in zip(frames, outputs):
             rows.append(make_table(np.full(len(out), t), -np.ones(len(out)), out[:, :4], out[:, 4]).astype(np.float32))
 
         np.savez(partial, rows=np.concatenate(rows) if rows else np.zeros((0, 7), np.float32),
-                 next_frame=frames[-1] + 1, elapsed=elapsed)
+                 next_frame=frames[-1] + 1, chunk_seconds=np.asarray(chunk_seconds))
 
         if verbose:
-            done = frames[-1] + 1
-            print(f"{seq.name}: {done}/{seq.n_frames} quadros, {elapsed / done:.2f} s/quadro", flush=True)
+            print(f"{seq.name}: {frames[-1] + 1}/{seq.n_frames} quadros, "
+                  f"{np.median(chunk_seconds):.2f} s/quadro (mediana dos blocos)", flush=True)
 
     table = np.concatenate(rows) if rows else np.zeros((0, 7), np.float32)
     np.save(path, table.astype(np.float32))
 
+    seconds = float(np.median(chunk_seconds)) if chunk_seconds else float("nan")
+
     with open(path.replace(".npy", ".time.txt"), "w") as fh:
-        fh.write(f"{elapsed:.1f} s para {seq.n_frames} quadros ({elapsed / seq.n_frames:.3f} s/quadro)\n")
+        fh.write(f"mediana dos blocos ({seconds:.3f} s/quadro) em {seq.n_frames} quadros\n")
 
     if os.path.exists(partial):
         os.remove(partial)
@@ -216,7 +236,7 @@ def read_time(seq_name, arch=DEFAULT_ARCH, cache_dir="../data/detections"):
         return None
 
     text = open(path).read()
-    return float(text.split("(")[1].split(" ")[0])
+    return float(text.split("(")[1].split(" ")[0])     # "... (X s/quadro) ..."
 
 
 def main(argv=None):
@@ -231,6 +251,8 @@ def main(argv=None):
     parser.add_argument("--root", default="data")
     parser.add_argument("--cache-dir", default="data/detections")
     parser.add_argument("--threads", type=int, default=None)
+    parser.add_argument("--busy-minutes", type=float, default=10.0,
+                        help="nao retoma um parcial escrito ha menos que isto (outro processo rodando)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 
     args = parser.parse_args(argv)
@@ -242,7 +264,12 @@ def main(argv=None):
 
     for name in args.sequences:
         seq = MOT17Sequence(name, args.root)
-        table = run_on_sequence(seq, model, args.arch, args.device, args.cache_dir)
+        try:
+            table = run_on_sequence(seq, model, args.arch, args.device, args.cache_dir,
+                                    busy_minutes=args.busy_minutes)
+        except SequenceBusy as exc:
+            print(f"{name}: pulando -- {exc}", flush=True)
+            continue
         print(f"{name}: {len(table)} caixas cruas de pessoa -> {cache_path(name, args.arch, args.cache_dir)}", flush=True)
 
 

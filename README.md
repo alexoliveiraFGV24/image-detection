@@ -11,9 +11,9 @@ autoria.
 Dataset: **MOT17 / MOTChallenge** (pedestres, caixas e identidades anotadas quadro a
 quadro; detecções públicas DPM / Faster R-CNN / SDP).
 
-> **Estado atual:** Partes 0 (testes sintéticos) e 1 (baseline por quadro no MOT17)
-> concluídas; `src/` contém os modelos, perdas, otimizadores, métricas, o rastreador e o
-> detector usados pelas partes seguintes.
+> **Estado atual:** Partes 0 (testes sintéticos), 1 (baseline por quadro no MOT17) e 2
+> (memória temporal, Trilha A) concluídas; `src/` contém os modelos, perdas,
+> otimizadores, métricas, o rastreador e o detector usados pelas partes seguintes.
 
 ---
 
@@ -115,8 +115,24 @@ python metrics.py --gt data/MOT17Labels/train/MOT17-09-FRCNN/gt/gt.txt --pred re
 (`reports/results/1_baseline_tracks/` tem as trajetórias do baseline nas sequências de
 validação. O CLI aplica o mesmo pré-processamento oficial dos distratores dos notebooks.)
 
-Os comandos de treino e avaliação do modelo temporal serão adicionados quando a
-Parte 2 for concluída.
+**Parte 2 — treinar e avaliar o modelo temporal** (GRU como modelo de movimento):
+treina a GRU nas trajetórias de treino com as detecções reais do SDP e avalia baseline ×
+Kalman × GRU nas 7 sequências; ~45 min em CPU. Se `reports/results/2_motion_gru.pt` existe
+o notebook só carrega o checkpoint (apague-o para treinar de novo):
+
+```bash
+jupyter nbconvert --to notebook --execute --inplace reports/2_temporal_memory.ipynb
+```
+
+O checkpoint é carregável fora do notebook (ver `checkpoint.json`):
+
+```python
+from src.nn.models import load_motion_model
+from src.nn.tracking import track_sequence, RNNMotion
+model, _ = load_motion_model("reports/results/2_motion_gru.pt")
+tracks = track_sequence(detections, n_frames, motion=RNNMotion(model, image_height, fps),
+                        matching="hungarian", iou_threshold=0.3, max_age=40)
+```
 
 ## 4. Estrutura do repositório
 
@@ -127,7 +143,7 @@ image-detection/
 ├── requirements.txt
 ├── metrics.py                     # entregável: IDF1, ID switches, fragmentações (+ CLI para arquivos MOT)
 ├── inferencia.ipynb               # entregável: inferência numa sequência qualquer (a preencher)
-├── checkpoint.json                # link/descrição do checkpoint do modelo temporal (a preencher)
+├── checkpoint.json                # onde estão os pesos do modelo temporal e como carregá-los
 ├── assignment/
 │   ├── PA2.pdf                    # enunciado
 │   ├── 06) Detecção de objetos.pdf
@@ -139,7 +155,8 @@ image-detection/
 │   │   │                          #   oclusão de duração controlada), simulate_detector, SyntheticVideoDataset
 │   │   ├── mot17.py               # MOT17Sequence (GT, detecções públicas, quadros), split por sequência,
 │   │   │                          #   pré-processamento oficial dos distratores, eixos de dificuldade
-│   │   └── trajectories.py        # TrajectoryDataset: janelas de trajetórias do GT para o MotionModel
+│   │   └── trajectories.py        # trajetórias do GT + detecções reais casadas (DetectorReplay) em
+│   │                              #   janelas para o MotionModel; ruído simulado (DetectionNoise)
 │   ├── nn/
 │   │   ├── boxes.py               # IoU vetorizado, NMS próprio, conversões, tabelas (frame, id, x1, y1, x2, y2, conf)
 │   │   ├── metrics.py             # AP/mAP por quadro; IDF1, ID switches, fragmentações, contagem de ids, MOTA
@@ -158,6 +175,7 @@ image-detection/
 ├── reports/
 │   ├── 0_sintetic_tests.ipynb     # Parte 0 — testes sintéticos
 │   ├── 1_baseline.ipynb           # Parte 1 — baseline por quadro no MOT17
+│   ├── 2_temporal_memory.ipynb    # Parte 2 — Trilha A: GRU como modelo de movimento
 │   └── results/                   # métricas (JSON/CSV) e checkpoints (.pt) de cada parte
 └── tests/tests.py                 # unittest
 ```
@@ -201,3 +219,26 @@ image-detection/
   identidade de 0,13 para 0,4–0,6). O Kalman de velocidade constante ajuda em oclusões
   curtas e perde em oclusões longas / velocidades altas por causa dos ricochetes nas
   bordas — velocidade constante prevê através da parede.
+
+### Parte 2 — memória temporal, Trilha A (`reports/2_temporal_memory.ipynb`)
+
+- **Modelo**: uma GRU (64 unidades, 14 mil parâmetros, células escritas do zero) por track,
+  alimentada com a velocidade observada relativa ao tamanho da caixa, a escala, a flag de
+  observação e Δt; sob oclusão ela recebe a própria previsão e roda para frente. Prevê o
+  deslocamento da caixa do quadro seguinte.
+- **Treino**: smooth-L1 no deslocamento, GT como alvo e as **detecções reais do SDP** como
+  entrada (o erro do detector é correlacionado no tempo, autocorrelação ~0,45 — ruído
+  independente simulado ensinaria a suavizar um tremor que não existe), blocos de ausência
+  de até 40 quadros, scheduled sampling 0 → 0,5.
+- **Previsão do quadro seguinte** (validação): a GRU é a melhor até ~15 quadros sem
+  observação (IoU 0,81 contra 0,79 do Kalman e da última caixa a partir de uma detecção;
+  0,36 contra 0,35 e 0,28 após 8–15 quadros).
+- **Rastreamento** (IDF1 combinado nas 7 sequências): última caixa 0,594 → Kalman 0,641 /
+  GRU 0,632; switches 1.438 → 1.048 / 1.180. A GRU **empata com o Kalman no treino e perde na
+  validação** (0,519 vs 0,557): prever um pouco melhor raramente muda um casamento com limiar
+  de IoU 0,3. Onde a memória ajuda é onde a Parte 1 apontou: nas câmeras móveis a identidade
+  sobrevive a buracos de 3–4 quadros em 74 % dos casos (58 % no baseline), nas paradas a
+  buracos de 20–39 quadros em 51 % (16 %), e as mortes por oclusão longa caem à metade.
+- **Incerteza + portão adaptativo** (NLL gaussiana; a elipse de busca cresce 20× após 1–2 s
+  sem observação): o melhor na validação (0,561) e o que menos inventa identidades, mas pior
+  no treino — pelo protocolo, o modelo final é a GRU com smooth-L1.

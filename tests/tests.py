@@ -298,21 +298,27 @@ class TestModels(unittest.TestCase):
             self.assertLessEqual(cell_parameter_count(kind, 11, H), 20000)
             self.assertGreater(cell_parameter_count(kind, 11, H + 1), 20000)
 
+    def _random_boxes(self, B, T):
+        """Caixas cxcywh plausiveis (positivas), andando devagar."""
+        start = torch.rand(B, 1, 4) * 0.5 + 0.25
+        drift = torch.randn(B, T, 4).cumsum(dim=1) * 0.01
+        return (start + drift).clamp(min=0.05)
+
     def test_motion_model_forward_and_step_agree(self):
         torch.manual_seed(0)
         model = MotionModel("lstm", hidden_size=16, predict_uncertainty=True).eval()
 
-        boxes = torch.rand(2, 6, 4)
+        boxes = self._random_boxes(2, 6)
         out = model(boxes)
         self.assertEqual(out["box"].shape, (2, 6, 4))
         self.assertEqual(out["log_var"].shape, (2, 6, 4))
 
-        # passo a passo (teacher forcing) da o mesmo que a sequencia
+        # passo a passo (tudo observado) da o mesmo que a sequencia
         state = model.init_state(2)
         prev = boxes[:, 0]
         ones = torch.ones(2, 1)
         for t in range(6):
-            step = model.step(boxes[:, t], prev, ones, state, conf=ones, dt=ones)
+            step = model.step(boxes[:, t], prev, ones, state, dt=ones)
             torch.testing.assert_close(step["box"], out["box"][:, t])
             state = step["state"]
             prev = boxes[:, t]
@@ -320,10 +326,51 @@ class TestModels(unittest.TestCase):
     def test_free_running_uses_own_prediction(self):
         torch.manual_seed(0)
         model = MotionModel("gru", hidden_size=16).eval()
-        boxes = torch.rand(1, 5, 4)
+        boxes = self._random_boxes(1, 5)
         out = model(boxes, sampling_prob=1.0)
-        # a partir de t=1 a entrada e a previsao anterior, nao o GT
+        # a partir de t=1 a entrada e a previsao anterior, nao a observacao
         torch.testing.assert_close(out["input"][:, 1:], out["box"][:, :-1])
+
+        # sem observacao (observed = 0) tambem, em qualquer regime
+        observed = torch.ones(1, 5, 1)
+        observed[:, 2:4] = 0
+        out = model(boxes, observed=observed, sampling_prob=0.0)
+        torch.testing.assert_close(out["input"][:, 2:4], out["box"][:, 1:3])
+        torch.testing.assert_close(out["input"][:, 4], boxes[:, 4])
+
+    def test_delta_encoding_roundtrip_and_scale_invariance(self):
+        from src.nn.models import encode_delta, decode_delta
+        ref = torch.tensor([[0.5, 0.5, 0.1, 0.3]])
+        box = torch.tensor([[0.53, 0.49, 0.11, 0.31]])
+        torch.testing.assert_close(decode_delta(ref, encode_delta(box, ref)), box)
+        # a mesma fracao do corpo, numa pessoa 3x maior, da o mesmo delta
+        torch.testing.assert_close(encode_delta(box * 3, ref * 3), encode_delta(box, ref))
+
+    def test_tbptt_continuation_matches_full_sequence(self):
+        """Rodar em dois blocos (passando estado, ultima entrada e ultima previsao) = rodar inteiro."""
+        torch.manual_seed(0)
+        model = MotionModel("gru", hidden_size=16).eval()
+        boxes = self._random_boxes(2, 8)
+        observed = torch.ones(2, 8, 1)
+        observed[0, 3:6] = 0
+        full = model(boxes, observed)
+        a = model(boxes[:, :4], observed[:, :4])
+        b = model(boxes[:, 4:], observed[:, 4:], state=a["state"], prev_input=a["last_input"], prev_pred=a["last_pred"])
+        torch.testing.assert_close(torch.cat([a["box"], b["box"]], dim=1), full["box"])
+
+    def test_rnn_motion_in_tracker(self):
+        """O adaptador em lote roda no Tracker e devolve caixas validas."""
+        from src.nn.tracking import RNNMotion
+        torch.manual_seed(0)
+        model = MotionModel("gru", hidden_size=8, predict_uncertainty=True)
+        gt = straight_tracks(n_ids=3, n_frames=15)
+        det = gt[(gt[:, 0] < 5) | (gt[:, 0] >= 8)].copy()
+        det[:, 1] = -1
+        motion = RNNMotion(model, image_height=128, fps=30)
+        pred, tracker = track_sequence(det, 15, motion=motion, iou_threshold=0.3, max_age=10,
+                                       return_tracker=True, gate=9.49)
+        self.assertEqual(len(pred), len(det))
+        self.assertTrue(np.isfinite(tracker.predicted_boxes_table()).all())
 
     def test_losses(self):
         pred = torch.zeros(2, 3, 4, requires_grad=True)
@@ -410,6 +457,26 @@ class TestPart1(unittest.TestCase):
         gt[(gt[:, 0] >= 5) & (gt[:, 0] < 9), 6] = 0.0               # 4 quadros invisivel, volta
         self.assertEqual(occlusion_durations(gt, max_visibility=0.25).tolist(), [4])
         np.testing.assert_allclose(consecutive_iou(gt), 1.0)        # parado: IoU 1 entre quadros
+
+
+class TestTrajectories(unittest.TestCase):
+
+    def test_detector_replay_uses_real_detections(self):
+        """A entrada e a caixa do detector casada com a pessoa; sem deteccao, o passo nao e observado."""
+        from src.dataset.trajectories import extract_trajectories, attach_detections, DetectorReplay, TrajectoryDataset
+        gt = straight_tracks(n_ids=2, n_frames=12)
+        det = gt.copy()
+        det[:, 1] = -1
+        det[:, 2:6] += 1.0                                          # erro de 1 px
+        det = det[~((det[:, 0] >= 4) & (det[:, 0] < 7) & (gt[:, 1] == 1))]   # pessoa 1 some em 4..6
+        traj = attach_detections(extract_trajectories(gt, image_height=100), gt, det, image_height=100)
+        ds = TrajectoryDataset(traj, length=12, stride=12, noise=DetectorReplay(occlusion_prob=0.0), fixed=True)
+        item = ds[0]                                                # pessoa 1
+        obs = item["observed"][:, 0].numpy()
+        self.assertEqual(obs[4:7].tolist(), [0, 0, 0])
+        self.assertTrue((obs[:4] == 1).all() and (obs[7:] == 1).all())
+        # onde observado, a entrada e a deteccao (deslocada de 1 px / 100 no centro), nao o GT
+        torch.testing.assert_close(item["inputs"][0, :2] - item["boxes"][0, :2], torch.tensor([0.01, 0.01]))
 
 
 if __name__ == "__main__":
